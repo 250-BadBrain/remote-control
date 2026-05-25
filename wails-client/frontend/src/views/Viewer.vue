@@ -40,7 +40,7 @@ const connectionMode = ref<ConnMode>('connecting')
 
 const params = new URLSearchParams(window.location.hash.split('?')[1] || '')
 const roomCode = params.get('code') || ''
-const signalAddr = params.get('signal') || getDefaultSignalServer() || 'ws://localhost:8080'
+const signalAddr = (params.get('signal') || getDefaultSignalServer() || 'ws://localhost:8080').replace(/\/+$/, '')
 
 const canvasRef = ref<HTMLCanvasElement | null>(null)
 const coords = ref('x: 0.000  y: 0.000')

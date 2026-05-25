@@ -33,14 +33,11 @@
       {{ connecting ? '连接中...' : '启动会话' }}
     </button>
 
-    <div class="links">
-      <a :href="mobileUrl" target="_blank" v-if="sessionId">📱 手机控制端页面</a>
-    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted } from 'vue'
 import { getDefaultSignalServer } from '../utils/signal'
 
 const go = (window as any).go
@@ -53,12 +50,6 @@ const devices = ref<{ id: string; name: string; status: string }[]>([])
 
 /* 服务端地址默认为本机，用户可根据实际局域网 IP 修改 */
 const serverAddr = ref(getDefaultSignalServer() || 'ws://localhost:8080')
-const serverHost = computed(() => {
-  try { return new URL(serverAddr.value).hostname } catch { return 'localhost' }
-})
-const mobileUrl = computed(() =>
-  `http://${serverHost.value}:8080/#/mobile?code=${sessionId.value}`
-)
 
 function copyCode() {
   navigator.clipboard?.writeText(sessionId.value)

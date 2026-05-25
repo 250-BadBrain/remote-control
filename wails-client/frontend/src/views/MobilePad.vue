@@ -87,7 +87,7 @@ function doConnect() {
     errorMsg.value = '请输入有效的 6 位房间码'
     return
   }
-  const addr = inputServer.value.trim() || 'ws://localhost:8080'
+  let addr = (inputServer.value.trim() || 'ws://localhost:8080').replace(/\/+$/, '')
   errorMsg.value = ''
   connect(code, addr)
 }

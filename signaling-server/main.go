@@ -8,6 +8,25 @@ import (
 )
 
 func main() {
+	// ---------- 日志初始化 ----------
+	execPath, err := os.Executable()
+	if err != nil {
+		log.Fatalf("获取可执行文件路径失败: %v", err)
+	}
+	logDir := filepath.Dir(execPath)
+	logPath := filepath.Join(logDir, "server.log")
+
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		log.Fatalf("创建日志文件失败: %v", err)
+	}
+	defer logFile.Close()
+
+	log.SetOutput(logFile)
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
+
+	log.Printf("[Server] 日志文件: %s", logPath)
+
 	hub := NewHub()
 	go hub.Run()
 
@@ -20,7 +39,6 @@ func main() {
 	})
 
 	// ---------- HTTP API / 静态文件 ----------
-	// 提供前端构建产物（手机控制页 / Viewer 页等）
 	staticDir := findStaticDir()
 	if staticDir != "" {
 		log.Printf("[HTTP] 从 %s 提供静态文件", staticDir)
@@ -35,18 +53,15 @@ func main() {
 	}
 
 	addr := ":8080"
-	log.Printf("[Server] 信令服务器启动于 %s", addr)
-	log.Fatal(http.ListenAndServe(addr, nil))
+	log.Printf("[Server] 信令服务器启动于 %s (HTTPS)", addr)
+	log.Fatalf("服务器启动失败: %v", http.ListenAndServeTLS(addr, "server.crt", "server.key", nil))
 }
 
 // findStaticDir 按优先级查找前端静态目录
 func findStaticDir() string {
 	candidates := []string{
-		// 相对于 signaling-server 可执行文件
 		filepath.Join("frontend", "dist"),
-		// 相对于工作目录
 		filepath.Join("..", "wails-client", "frontend", "dist"),
-		// 同目录
 		"dist",
 	}
 	for _, dir := range candidates {

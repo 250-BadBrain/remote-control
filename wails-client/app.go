@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/url"
+	"path"
 	"sync"
 
 	"github.com/go-vgo/robotgo"
@@ -81,7 +82,7 @@ type App struct {
 }
 
 func NewApp() *App {
-	return &App{}
+	return &App{insecureTLS: true}
 }
 
 // SetInsecureTLS 当信令服务器使用自签名 TLS 证书时调用（仅限 wss://）
@@ -124,6 +125,7 @@ func (a *App) Connect(role, signalingURL, sessionID string) error {
 	a.sessionID = sessionID
 
 	u, _ := url.Parse(signalingURL)
+	u.Path = path.Join("/connect", role)
 	q := u.Query()
 	if sessionID != "" {
 		q.Set("sid", sessionID)
@@ -234,7 +236,7 @@ func (a *App) SendCommand(cmdJSON string) error {
 func (a *App) setupDataChannel(dc *webrtc.DataChannel) {
 	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
 		// 如果是文本消息，作为控制指令处理；二进制消息为屏幕帧（忽略，本端不需要渲染）
-		if msg.IsText {
+		if msg.IsString {
 			a.handleCommand(string(msg.Data))
 		}
 	})
@@ -341,11 +343,11 @@ func (a *App) execScroll(d scrollData) {
 	}
 	if clicks > 0 {
 		for i := 0; i < clicks; i++ {
-			robotgo.ScrollMouse(1, "down")
+			robotgo.ScrollDir(1, "down")
 		}
 	} else {
 		for i := 0; i < -clicks; i++ {
-			robotgo.ScrollMouse(1, "up")
+			robotgo.ScrollDir(1, "up")
 		}
 	}
 }
