@@ -1,0 +1,35 @@
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+go.sum
+vendor/
+
+# Wails
+wails-client/build/
+wails-client/frontend/node_modules/
+wails-client/frontend/dist/
+
+# Node
+node_modules/
+dist/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env (keep .env.production template)
+.env
+.env.local
+.env.development
+!.env.production
