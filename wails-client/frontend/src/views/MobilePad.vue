@@ -449,8 +449,8 @@ function clickRight() {
 /* 预览条 */
 .preview-bar {
   position: relative;
-  height: 22vh;
-  min-height: 120px;
+  height: clamp(220px, 52vh, 520px);
+  min-height: 220px;
   background: #000;
   border-bottom: 2px solid #1e293b;
 }
@@ -463,10 +463,22 @@ function clickRight() {
 /* 摇杆 + 按键行 */
 .pad-row {
   flex: 1;
+  min-height: 190px;
   display: flex;
   align-items: center;
   justify-content: space-around;
   padding: 0.5rem;
+}
+
+@media (max-height: 680px) {
+  .preview-bar {
+    height: 44vh;
+    min-height: 160px;
+  }
+
+  .pad-row {
+    min-height: 170px;
+  }
 }
 
 /* 摇杆容器 */

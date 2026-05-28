@@ -12,9 +12,9 @@ import (
 )
 
 const (
-	captureFPS      = 10
-	captureJpegQl   = 55
-	captureMaxWidth = 1280
+	captureFPS      = 8
+	captureJpegQl   = 68
+	captureMaxWidth = 1600
 )
 
 // ScreenCapture 驱动屏幕捕获循环，每帧 JPEG 通过 sendFrame 回调发送。

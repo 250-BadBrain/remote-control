@@ -12,13 +12,11 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// ---------- role constants ----------
 const (
 	RoleComputer = "computer"
 	RolePhone    = "phone"
 )
 
-// ---------- wire protocol ----------
 type envelope struct {
 	Type    string          `json:"type"`
 	Payload json.RawMessage `json:"payload"`
@@ -26,10 +24,9 @@ type envelope struct {
 	To      string          `json:"to,omitempty"`
 }
 
-// ---------- 优化四：类型感知的消息单元 ----------
 type outgoingMsg struct {
-	msgType int    // websocket.TextMessage or websocket.BinaryMessage
-	data    []byte // 零拷贝：直接引用原始 byte 切片
+	msgType int
+	data    []byte
 }
 
 const (
@@ -38,14 +35,13 @@ const (
 	wsPingPeriod = 25 * time.Second
 )
 
-// ---------- peer ----------
 type peer struct {
-	role string
-	conn *websocket.Conn
-	send chan outgoingMsg
+	role        string
+	conn        *websocket.Conn
+	send        chan outgoingMsg
+	latestFrame chan []byte
 }
 
-// ---------- session ----------
 type session struct {
 	id       string
 	computer *peer
@@ -53,7 +49,6 @@ type session struct {
 	mu       sync.RWMutex
 }
 
-// ---------- hub ----------
 type Hub struct {
 	sessions map[string]*session
 	mu       sync.RWMutex
@@ -65,7 +60,6 @@ func NewHub() *Hub {
 
 func (h *Hub) Run() {}
 
-// generateRoomCode 生成 6 位纯数字房间码（如 888999）
 func generateRoomCode() string {
 	const digits = "0123456789"
 	code := make([]byte, 6)
@@ -92,7 +86,6 @@ func (h *Hub) getOrCreateSession(sid string) *session {
 	return s
 }
 
-// getSession 只读获取 session，不创建（用于 forward 路径）
 func (h *Hub) getSession(sid string) *session {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -106,7 +99,6 @@ func (h *Hub) removeSession(sid string) {
 	log.Printf("[Hub] 删除会话 %s", sid)
 }
 
-// assignPeer 将 peer 注册到会话中
 func (h *Hub) assignPeer(sid string, p *peer) {
 	s := h.getOrCreateSession(sid)
 	s.mu.Lock()
@@ -161,7 +153,6 @@ func (h *Hub) unassignPeer(sid string, p *peer) {
 	}
 }
 
-// forwardWithType 将消息转发给会话中的对端（优化四：保留消息类型，零拷贝 byte 切片）
 func (h *Hub) forwardWithType(sid, fromRole string, msg []byte, msgType int) {
 	s := h.getSession(sid)
 	if s == nil {
@@ -179,23 +170,45 @@ func (h *Hub) forwardWithType(sid, fromRole string, msg []byte, msgType int) {
 		target = s.computer
 	}
 	if target == nil {
-		log.Printf("[Hub] 会话 %s: 无目标 (%s 源)，丢弃 %d 字节", sid, fromRole, len(msg))
+		log.Printf("[Hub] 会话 %s: 无目标(%s 源)，丢弃 %d 字节", sid, fromRole, len(msg))
+		return
+	}
+
+	if msgType == websocket.BinaryMessage {
+		h.forwardLatestFrame(sid, target, msg)
 		return
 	}
 
 	select {
 	case target.send <- outgoingMsg{msgType: msgType, data: msg}:
 	default:
-		log.Printf("[Hub] 会话 %s: 目标发送缓冲区满，丢弃 %d 字节", sid, len(msg))
+		log.Printf("[Hub] 会话 %s: 目标控制管道满，丢弃 %d 字节", sid, len(msg))
 	}
 }
 
-// ---------- WebSocket wiring ----------
+func (h *Hub) forwardLatestFrame(sid string, target *peer, frame []byte) {
+	select {
+	case target.latestFrame <- frame:
+		return
+	default:
+	}
+
+	select {
+	case <-target.latestFrame:
+	default:
+	}
+
+	select {
+	case target.latestFrame <- frame:
+	default:
+		log.Printf("[Hub] 会话 %s: 目标帧槽位满，丢弃 %d 字节", sid, len(frame))
+	}
+}
+
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
-// serveWS 处理 WebSocket 升级与消息循环
 func serveWS(hub *Hub, w http.ResponseWriter, r *http.Request, role string) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -203,9 +216,7 @@ func serveWS(hub *Hub, w http.ResponseWriter, r *http.Request, role string) {
 		return
 	}
 
-	// ---- 处理 Session ID ----
 	sid := r.URL.Query().Get("sid")
-
 	if role == RoleComputer && sid == "" {
 		sid = generateRoomCode()
 		log.Printf("[Hub] 为新电脑分配房间码: %s", sid)
@@ -213,20 +224,20 @@ func serveWS(hub *Hub, w http.ResponseWriter, r *http.Request, role string) {
 
 	if sid == "" {
 		log.Printf("[WS] 拒绝连接: 未提供 sid")
-		conn.WriteJSON(envelope{Type: "error", Payload: []byte(`"missing session ID"`)})
-		conn.Close()
+		_ = conn.WriteJSON(envelope{Type: "error", Payload: []byte(`"missing session ID"`)})
+		_ = conn.Close()
 		return
 	}
 
 	p := &peer{
-		role: role,
-		conn: conn,
-		send: make(chan outgoingMsg, 128), // 增大缓冲区适应二进制帧
+		role:        role,
+		conn:        conn,
+		send:        make(chan outgoingMsg, 64),
+		latestFrame: make(chan []byte, 1),
 	}
 
 	hub.assignPeer(sid, p)
 
-	// ---- 如果是电脑端且刚分配了房间码，发送给客户端 ----
 	if role == RoleComputer {
 		sidPayload, _ := json.Marshal(sid)
 		assigned, _ := json.Marshal(envelope{Type: "session_assigned", Payload: sidPayload})
@@ -236,39 +247,13 @@ func serveWS(hub *Hub, w http.ResponseWriter, r *http.Request, role string) {
 		}
 	}
 
-	// ---- write pump: 类型感知写入（优化四） ----
-	go func() {
-		ticker := time.NewTicker(wsPingPeriod)
-		defer ticker.Stop()
-		defer conn.Close()
-		for {
-			select {
-			case msg, ok := <-p.send:
-				if !ok {
-					_ = conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
-					_ = conn.WriteMessage(websocket.CloseMessage, []byte{})
-					return
-				}
-				_ = conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
-				if err := conn.WriteMessage(msg.msgType, msg.data); err != nil {
-					log.Printf("[WS] 写入错误 (%s %s): %v", sid, role, err)
-					return
-				}
-			case <-ticker.C:
-				_ = conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
-				if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
-					log.Printf("[WS] ping 错误 (%s %s): %v", sid, role, err)
-					return
-				}
-			}
-		}
-	}()
+	go writePump(conn, p, sid, role)
 
-	// ---- read pump: 读取并转发（优化四：保留二进制类型） ----
 	defer func() {
 		hub.unassignPeer(sid, p)
-		conn.Close()
+		_ = conn.Close()
 		close(p.send)
+		close(p.latestFrame)
 	}()
 
 	conn.SetReadLimit(2 << 20)
@@ -284,13 +269,11 @@ func serveWS(hub *Hub, w http.ResponseWriter, r *http.Request, role string) {
 			break
 		}
 
-		// 二进制消息直接转发（优化四：零拷贝，无 JSON 开销）
 		if msgType == websocket.BinaryMessage {
 			hub.forwardWithType(sid, role, raw, websocket.BinaryMessage)
 			continue
 		}
 
-		// TextMessage: 检测 forward 信封
 		var msg envelope
 		if err := json.Unmarshal(raw, &msg); err != nil {
 			continue
@@ -308,11 +291,66 @@ func serveWS(hub *Hub, w http.ResponseWriter, r *http.Request, role string) {
 						payload = []byte(text)
 					}
 				}
-				// 内层 payload 以原始 JSON 字节转发；兼容前端传字符串化 JSON 的情况。
 				hub.forwardWithType(sid, inner.From, payload, websocket.TextMessage)
 				continue
 			}
 		}
 		hub.forwardWithType(sid, role, raw, websocket.TextMessage)
 	}
+}
+
+func writePump(conn *websocket.Conn, p *peer, sid, role string) {
+	ticker := time.NewTicker(wsPingPeriod)
+	defer ticker.Stop()
+	defer conn.Close()
+
+	for {
+		select {
+		case msg, ok := <-p.send:
+			if !ok {
+				_ = conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
+				_ = conn.WriteMessage(websocket.CloseMessage, []byte{})
+				return
+			}
+			if !writeWS(conn, sid, role, msg.msgType, msg.data) {
+				return
+			}
+			continue
+		default:
+		}
+
+		select {
+		case msg, ok := <-p.send:
+			if !ok {
+				_ = conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
+				_ = conn.WriteMessage(websocket.CloseMessage, []byte{})
+				return
+			}
+			if !writeWS(conn, sid, role, msg.msgType, msg.data) {
+				return
+			}
+		case frame, ok := <-p.latestFrame:
+			if !ok {
+				return
+			}
+			if !writeWS(conn, sid, role, websocket.BinaryMessage, frame) {
+				return
+			}
+		case <-ticker.C:
+			_ = conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
+			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				log.Printf("[WS] ping 错误 (%s %s): %v", sid, role, err)
+				return
+			}
+		}
+	}
+}
+
+func writeWS(conn *websocket.Conn, sid, role string, msgType int, data []byte) bool {
+	_ = conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
+	if err := conn.WriteMessage(msgType, data); err != nil {
+		log.Printf("[WS] 写入错误 (%s %s): %v", sid, role, err)
+		return false
+	}
+	return true
 }
