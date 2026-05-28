@@ -26,4 +26,15 @@ const router = createRouter({
   routes,
 })
 
+function isMobileBrowser() {
+  const ua = navigator.userAgent || ''
+  return /Android|iPhone|iPad|iPod|Mobile|Windows Phone/i.test(ua)
+}
+
+router.beforeEach((to) => {
+  if (to.path === '/' && isMobileBrowser()) {
+    return { path: '/mobile', query: to.query, hash: to.hash }
+  }
+})
+
 export default router

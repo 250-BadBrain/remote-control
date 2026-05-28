@@ -1,4 +1,4 @@
-export const DEFAULT_SIGNAL_SERVER = 'wss://161.153.98.231:8443'
+export const DEFAULT_SIGNAL_SERVER = 'wss://signal.h2seo4.win:8443'
 
 export function getDefaultSignalServer(): string {
   if (import.meta.env.DEV) {

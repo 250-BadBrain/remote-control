@@ -4,7 +4,7 @@
     <div v-if="!connected" class="connect-form">
       <h1>远程控制</h1>
       <input v-model="inputCode" placeholder="输入 6 位房间码" maxlength="6" class="code-input" />
-      <input v-model="inputServer" placeholder="信令服务器地址 (默认 wss://161.153.98.231:8443)" class="server-input" />
+      <input v-model="inputServer" placeholder="信令服务器地址 (默认 wss://signal.h2seo4.win:8443)" class="server-input" />
       <button @click="doConnect" class="btn-connect">连接</button>
       <p v-if="errorMsg" class="error">{{ errorMsg }}</p>
     </div>

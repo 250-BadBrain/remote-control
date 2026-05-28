@@ -9,7 +9,7 @@
 
     <section class="card">
       <label class="label-sm">信令服务器</label>
-      <input v-model="serverAddr" class="input-server" placeholder="wss://161.153.98.231:8443" />
+      <input v-model="serverAddr" class="input-server" placeholder="wss://signal.h2seo4.win:8443" />
     </section>
 
     <section class="card">
