@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -30,6 +31,12 @@ type outgoingMsg struct {
 	msgType int    // websocket.TextMessage or websocket.BinaryMessage
 	data    []byte // 零拷贝：直接引用原始 byte 切片
 }
+
+const (
+	wsWriteWait  = 10 * time.Second
+	wsPongWait   = 70 * time.Second
+	wsPingPeriod = 25 * time.Second
+)
 
 // ---------- peer ----------
 type peer struct {
@@ -231,11 +238,28 @@ func serveWS(hub *Hub, w http.ResponseWriter, r *http.Request, role string) {
 
 	// ---- write pump: 类型感知写入（优化四） ----
 	go func() {
+		ticker := time.NewTicker(wsPingPeriod)
+		defer ticker.Stop()
 		defer conn.Close()
-		for msg := range p.send {
-			if err := conn.WriteMessage(msg.msgType, msg.data); err != nil {
-				log.Printf("[WS] 写入错误 (%s %s): %v", sid, role, err)
-				return
+		for {
+			select {
+			case msg, ok := <-p.send:
+				if !ok {
+					_ = conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
+					_ = conn.WriteMessage(websocket.CloseMessage, []byte{})
+					return
+				}
+				_ = conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
+				if err := conn.WriteMessage(msg.msgType, msg.data); err != nil {
+					log.Printf("[WS] 写入错误 (%s %s): %v", sid, role, err)
+					return
+				}
+			case <-ticker.C:
+				_ = conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
+				if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+					log.Printf("[WS] ping 错误 (%s %s): %v", sid, role, err)
+					return
+				}
 			}
 		}
 	}()
@@ -246,6 +270,12 @@ func serveWS(hub *Hub, w http.ResponseWriter, r *http.Request, role string) {
 		conn.Close()
 		close(p.send)
 	}()
+
+	conn.SetReadLimit(2 << 20)
+	_ = conn.SetReadDeadline(time.Now().Add(wsPongWait))
+	conn.SetPongHandler(func(string) error {
+		return conn.SetReadDeadline(time.Now().Add(wsPongWait))
+	})
 
 	for {
 		msgType, raw, err := conn.ReadMessage()

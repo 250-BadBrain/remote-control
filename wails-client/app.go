@@ -6,12 +6,15 @@ import (
 	"encoding/json"
 	"log"
 	"net/url"
+	"os"
 	"path"
+	"path/filepath"
 	"sync"
 
 	"github.com/go-vgo/robotgo"
 	"github.com/gorilla/websocket"
 	"github.com/pion/webrtc/v3"
+	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 	"golang.org/x/sys/windows"
 )
 
@@ -75,6 +78,7 @@ type App struct {
 	pc        *webrtc.PeerConnection
 	dc        *webrtc.DataChannel
 	mu        sync.Mutex
+	peerReady bool
 
 	// 屏幕参数（优化二：DPI 自适应）
 	screenW     int     // 物理像素宽
@@ -107,6 +111,7 @@ func (a *App) GetInsecureTLS() bool {
 
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
+	setupClientLog()
 
 	// 获取物理分辨率
 	a.screenW, a.screenH = robotgo.GetScreenSize()
@@ -118,6 +123,21 @@ func (a *App) startup(ctx context.Context) {
 
 	log.Printf("[App] 物理=%dx%d  逻辑=%dx%d  DPI=%.2f",
 		a.screenW, a.screenH, a.logicalW, a.logicalH, a.dpiScale)
+}
+
+func setupClientLog() {
+	execPath, err := os.Executable()
+	if err != nil {
+		return
+	}
+	logPath := filepath.Join(filepath.Dir(execPath), "client.log")
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return
+	}
+	log.SetOutput(logFile)
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
+	log.Printf("[App] 日志文件: %s", logPath)
 }
 
 // ---------- Wails bindings ----------
@@ -132,6 +152,21 @@ func (a *App) getRole() string {
 	return a.role
 }
 
+func (a *App) GetPeerConnected() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.peerReady
+}
+
+func (a *App) setPeerConnected(ready bool) {
+	a.mu.Lock()
+	a.peerReady = ready
+	a.mu.Unlock()
+	if a.ctx != nil {
+		wailsruntime.EventsEmit(a.ctx, "peer_status", ready)
+	}
+}
+
 func (a *App) writeSignal(msg []byte) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -141,11 +176,19 @@ func (a *App) writeSignal(msg []byte) error {
 	return a.sigConn.WriteMessage(websocket.TextMessage, msg)
 }
 
+func (a *App) dataChannelOpen() bool {
+	a.mu.Lock()
+	dc := a.dc
+	a.mu.Unlock()
+	return dc != nil && dc.ReadyState() == webrtc.DataChannelStateOpen
+}
+
 // Connect dials the signaling server and establishes WebRTC.
 func (a *App) Connect(role, signalingURL, sessionID string) error {
 	a.sessionID = sessionID
 	a.mu.Lock()
 	a.role = role
+	a.peerReady = false
 	a.mu.Unlock()
 
 	u, _ := url.Parse(signalingURL)
@@ -199,6 +242,19 @@ func (a *App) Connect(role, signalingURL, sessionID string) error {
 		return err
 	}
 	a.pc = pc
+
+	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+		log.Printf("[App] PeerConnection state: %s", state.String())
+		if state == webrtc.PeerConnectionStateFailed ||
+			state == webrtc.PeerConnectionStateDisconnected ||
+			state == webrtc.PeerConnectionStateClosed {
+			a.setPeerConnected(false)
+		}
+	})
+
+	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
+		log.Printf("[App] ICE state: %s", state.String())
+	})
 
 	if role == RolePhone {
 		dc, err := pc.CreateDataChannel("control", nil)
@@ -258,6 +314,15 @@ func (a *App) SendCommand(cmdJSON string) error {
 // ---------- internal ----------
 
 func (a *App) setupDataChannel(dc *webrtc.DataChannel) {
+	dc.OnClose(func() {
+		log.Printf("[App] DataChannel closed")
+		a.setPeerConnected(false)
+	})
+
+	dc.OnError(func(err error) {
+		log.Printf("[App] DataChannel error: %v", err)
+	})
+
 	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
 		// 如果是文本消息，作为控制指令处理；二进制消息为屏幕帧（忽略，本端不需要渲染）
 		if msg.IsString && a.getRole() == RoleComputer {
@@ -267,19 +332,33 @@ func (a *App) setupDataChannel(dc *webrtc.DataChannel) {
 
 	// 作为被控端（computer），当 DataChannel 开启后开始推送屏幕帧
 	dc.OnOpen(func() {
+		a.setPeerConnected(true)
 		if a.getRole() != RoleComputer {
 			log.Printf("[App] DataChannel 已开启，当前角色无需推送屏幕")
 			return
 		}
 		log.Printf("[App] DataChannel 已开启，开始屏幕捕获推送")
 		a.dc = dc
-		go ScreenCapture(func(frame []byte) {
-			if dc.ReadyState() == webrtc.DataChannelStateOpen {
+		go func() {
+			sent := 0
+			ScreenCapture(func(frame []byte) bool {
+				if dc.ReadyState() != webrtc.DataChannelStateOpen {
+					return false
+				}
+				if dc.BufferedAmount()+uint64(len(frame)) > 2*1024*1024 {
+					return true
+				}
 				if err := dc.Send(frame); err != nil {
 					log.Printf("[App] 发送帧失败: %v", err)
+					return false
 				}
-			}
-		})
+				sent++
+				if sent == 1 || sent%50 == 0 {
+					log.Printf("[App] 已发送屏幕帧 %d，当前帧 %d bytes", sent, len(frame))
+				}
+				return true
+			})
+		}()
 	})
 }
 
@@ -381,7 +460,12 @@ func (a *App) execScroll(d scrollData) {
 }
 
 func (a *App) readSignaling() {
-	defer a.sigConn.Close()
+	defer func() {
+		if !a.dataChannelOpen() {
+			a.setPeerConnected(false)
+		}
+		a.sigConn.Close()
+	}()
 	for {
 		_, raw, err := a.sigConn.ReadMessage()
 		if err != nil {
@@ -436,6 +520,7 @@ func (a *App) readSignaling() {
 			a.pc.AddICECandidate(cand)
 
 		case "peer_joined":
+			a.setPeerConnected(true)
 			log.Printf("[App] peer joined session %s", a.sessionID)
 
 		// ── 优化：WebSocket 回退通道的控制指令 ──

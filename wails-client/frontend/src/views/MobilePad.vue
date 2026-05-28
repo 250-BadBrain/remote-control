@@ -41,7 +41,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import nipplejs from 'nipplejs'
 import { DEFAULT_SIGNAL_SERVER, getDefaultSignalServer } from '../utils/signal'
 
@@ -70,7 +70,6 @@ let relayTimeout: ReturnType<typeof setTimeout> | null = null
 /* ---- 虚拟光标 (摇杆控制) ---- */
 let cursorX = 0.5
 let cursorY = 0.5
-let moveInterval: ReturnType<typeof setInterval> | null = null
 
 /* ---- 工具函数 ---- */
 function buildEnv(type: string, payload: unknown) {
@@ -251,9 +250,9 @@ let lastJoyX = -1
 let lastJoyY = -1
 
 /* ---- 摇杆逻辑 (nipplejs) ---- */
-onMounted(async () => {
+async function initJoystick() {
   await nextTick()
-  if (!joystickZone.value) return
+  if (!joystickZone.value || joystick) return
 
   joystick = nipplejs.create({
     zone: joystickZone.value,
@@ -293,6 +292,19 @@ onMounted(async () => {
   joystick.on('end', () => {
     /* 摇杆归中时不做操作 */
   })
+}
+
+onMounted(() => {
+  if (connected.value) initJoystick()
+})
+
+watch(connected, (value) => {
+  if (value) {
+    initJoystick()
+  } else {
+    joystick?.destroy()
+    joystick = null
+  }
 })
 
 onUnmounted(() => {

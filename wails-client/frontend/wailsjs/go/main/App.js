@@ -10,6 +10,10 @@ export function GetInsecureTLS() {
   return window['go']['main']['App']['GetInsecureTLS']();
 }
 
+export function GetPeerConnected() {
+  return window['go']['main']['App']['GetPeerConnected']();
+}
+
 export function GetSessionID() {
   return window['go']['main']['App']['GetSessionID']();
 }

@@ -37,7 +37,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import { DEFAULT_SIGNAL_SERVER, getDefaultSignalServer } from '../utils/signal'
 
 const go = (window as any).go
@@ -47,6 +47,7 @@ const sessionId = ref('')
 const connected = ref(false)
 const connecting = ref(false)
 const devices = ref<{ id: string; name: string; status: string }[]>([])
+let peerPoll: ReturnType<typeof setInterval> | null = null
 
 /* 服务端地址默认为本机，用户可根据实际局域网 IP 修改 */
 const serverAddr = ref(getDefaultSignalServer() || DEFAULT_SIGNAL_SERVER)
@@ -76,6 +77,14 @@ async function startSession() {
   connecting.value = false
 }
 
+async function refreshPeerStatus() {
+  if (!app?.GetPeerConnected) return
+  const ready = await app.GetPeerConnected()
+  devices.value = ready
+    ? [{ id: 'phone', name: '手机浏览器', status: '已接入' }]
+    : []
+}
+
 onMounted(async () => {
   if (app?.GetSessionID) {
     const id = await app.GetSessionID()
@@ -84,6 +93,12 @@ onMounted(async () => {
       connected.value = true
     }
   }
+  await refreshPeerStatus()
+  peerPoll = setInterval(refreshPeerStatus, 1000)
+})
+
+onUnmounted(() => {
+  if (peerPoll) clearInterval(peerPoll)
 })
 </script>
 
