@@ -71,14 +71,15 @@ func getDPIScale() float64 {
 
 // ---------- App ----------
 type App struct {
-	ctx       context.Context
-	sessionID string
-	role      string
-	sigConn   *websocket.Conn
-	pc        *webrtc.PeerConnection
-	dc        *webrtc.DataChannel
-	mu        sync.Mutex
-	peerReady bool
+	ctx                 context.Context
+	sessionID           string
+	role                string
+	sigConn             *websocket.Conn
+	pc                  *webrtc.PeerConnection
+	dc                  *webrtc.DataChannel
+	mu                  sync.Mutex
+	peerReady           bool
+	relayCaptureRunning bool
 
 	// 屏幕参数（优化二：DPI 自适应）
 	screenW     int     // 物理像素宽
@@ -153,6 +154,10 @@ func (a *App) getRole() string {
 }
 
 func (a *App) GetPeerConnected() bool {
+	return a.getPeerConnected()
+}
+
+func (a *App) getPeerConnected() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.peerReady
@@ -167,13 +172,17 @@ func (a *App) setPeerConnected(ready bool) {
 	}
 }
 
-func (a *App) writeSignal(msg []byte) error {
+func (a *App) writeSignalMessage(msgType int, msg []byte) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.sigConn == nil {
 		return nil
 	}
-	return a.sigConn.WriteMessage(websocket.TextMessage, msg)
+	return a.sigConn.WriteMessage(msgType, msg)
+}
+
+func (a *App) writeSignal(msg []byte) error {
+	return a.writeSignalMessage(websocket.TextMessage, msg)
 }
 
 func (a *App) dataChannelOpen() bool {
@@ -189,6 +198,7 @@ func (a *App) Connect(role, signalingURL, sessionID string) error {
 	a.mu.Lock()
 	a.role = role
 	a.peerReady = false
+	a.relayCaptureRunning = false
 	a.mu.Unlock()
 
 	u, _ := url.Parse(signalingURL)
@@ -248,7 +258,11 @@ func (a *App) Connect(role, signalingURL, sessionID string) error {
 		if state == webrtc.PeerConnectionStateFailed ||
 			state == webrtc.PeerConnectionStateDisconnected ||
 			state == webrtc.PeerConnectionStateClosed {
-			a.setPeerConnected(false)
+			if a.getRole() == RoleComputer && state != webrtc.PeerConnectionStateClosed {
+				a.startRelayCapture()
+			} else {
+				a.setPeerConnected(false)
+			}
 		}
 	})
 
@@ -316,6 +330,10 @@ func (a *App) SendCommand(cmdJSON string) error {
 func (a *App) setupDataChannel(dc *webrtc.DataChannel) {
 	dc.OnClose(func() {
 		log.Printf("[App] DataChannel closed")
+		if a.getRole() == RoleComputer && a.getPeerConnected() {
+			a.startRelayCapture()
+			return
+		}
 		a.setPeerConnected(false)
 	})
 
@@ -360,6 +378,49 @@ func (a *App) setupDataChannel(dc *webrtc.DataChannel) {
 			})
 		}()
 	})
+}
+
+func (a *App) startRelayCapture() {
+	if a.getRole() != RoleComputer {
+		return
+	}
+
+	a.mu.Lock()
+	if a.relayCaptureRunning {
+		a.mu.Unlock()
+		return
+	}
+	a.relayCaptureRunning = true
+	a.mu.Unlock()
+
+	go func() {
+		defer func() {
+			a.mu.Lock()
+			a.relayCaptureRunning = false
+			a.mu.Unlock()
+			log.Printf("[App] WebSocket relay capture stopped")
+		}()
+
+		sent := 0
+		log.Printf("[App] WebSocket relay capture started")
+		ScreenCapture(func(frame []byte) bool {
+			if !a.getPeerConnected() {
+				return false
+			}
+			if a.dataChannelOpen() {
+				return false
+			}
+			if err := a.writeSignalMessage(websocket.BinaryMessage, frame); err != nil {
+				log.Printf("[App] relay frame send failed: %v", err)
+				return false
+			}
+			sent++
+			if sent == 1 || sent%50 == 0 {
+				log.Printf("[App] relay frames sent %d, frame %d bytes", sent, len(frame))
+			}
+			return true
+		})
+	}()
 }
 
 func (a *App) handleCommand(raw string) {
@@ -522,6 +583,7 @@ func (a *App) readSignaling() {
 		case "peer_joined":
 			a.setPeerConnected(true)
 			log.Printf("[App] peer joined session %s", a.sessionID)
+			a.startRelayCapture()
 
 		// ── 优化：WebSocket 回退通道的控制指令 ──
 		// 当浏览器端 WebRTC DataChannel 未能打通时，

@@ -95,12 +95,23 @@ function connect(code: string, addr: string) {
   sessionId.value = code
   const url = `${addr}/connect/phone?sid=${encodeURIComponent(code)}`
   ws = new WebSocket(url)
+  ws.binaryType = 'blob'
 
   ws.onopen = () => {
     connected.value = true
   }
 
   ws.onmessage = (evt: MessageEvent) => {
+    if (evt.data instanceof Blob) {
+      connectionMode.value = 'relay'
+      onVideoFrame(evt.data)
+      return
+    }
+    if (evt.data instanceof ArrayBuffer) {
+      connectionMode.value = 'relay'
+      onVideoFrame(new Blob([evt.data], { type: 'image/jpeg' }))
+      return
+    }
     try {
       onSignalMessage(JSON.parse(evt.data))
     } catch { /* ignore */ }
