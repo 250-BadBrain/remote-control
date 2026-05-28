@@ -23,6 +23,11 @@ type envelope struct {
 	To      string          `json:"to,omitempty"`
 }
 
+const (
+	RoleComputer = "computer"
+	RolePhone    = "phone"
+)
+
 type mouseMoveData struct {
 	XRatio float64 `json:"xRatio"`
 	YRatio float64 `json:"yRatio"`
@@ -65,20 +70,21 @@ func getDPIScale() float64 {
 type App struct {
 	ctx       context.Context
 	sessionID string
+	role      string
 	sigConn   *websocket.Conn
 	pc        *webrtc.PeerConnection
 	dc        *webrtc.DataChannel
 	mu        sync.Mutex
 
 	// 屏幕参数（优化二：DPI 自适应）
-	screenW    int     // 物理像素宽
-	screenH    int     // 物理像素高
-	logicalW   int     // 逻辑像素宽（DPI 缩放后）
-	logicalH   int     // 逻辑像素高
-	dpiScale   float64 // DPI 缩放系数 (1.0 / 1.25 / 1.5 / 2.0 …)
-	captureW   int     // 屏幕捕获实际宽度（与截图一致）
-	captureH   int     // 屏幕捕获实际高度
-	insecureTLS bool   // wss 连接时是否跳过 TLS 证书校验（自签名证书）
+	screenW     int     // 物理像素宽
+	screenH     int     // 物理像素高
+	logicalW    int     // 逻辑像素宽（DPI 缩放后）
+	logicalH    int     // 逻辑像素高
+	dpiScale    float64 // DPI 缩放系数 (1.0 / 1.25 / 1.5 / 2.0 …)
+	captureW    int     // 屏幕捕获实际宽度（与截图一致）
+	captureH    int     // 屏幕捕获实际高度
+	insecureTLS bool    // wss 连接时是否跳过 TLS 证书校验（自签名证书）
 }
 
 func NewApp() *App {
@@ -120,9 +126,27 @@ func (a *App) GetSessionID() string {
 	return a.sessionID
 }
 
+func (a *App) getRole() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.role
+}
+
+func (a *App) writeSignal(msg []byte) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.sigConn == nil {
+		return nil
+	}
+	return a.sigConn.WriteMessage(websocket.TextMessage, msg)
+}
+
 // Connect dials the signaling server and establishes WebRTC.
 func (a *App) Connect(role, signalingURL, sessionID string) error {
 	a.sessionID = sessionID
+	a.mu.Lock()
+	a.role = role
+	a.mu.Unlock()
 
 	u, _ := url.Parse(signalingURL)
 	u.Path = path.Join("/connect", role)
@@ -176,7 +200,7 @@ func (a *App) Connect(role, signalingURL, sessionID string) error {
 	}
 	a.pc = pc
 
-	if role == "phone" {
+	if role == RolePhone {
 		dc, err := pc.CreateDataChannel("control", nil)
 		if err != nil {
 			return err
@@ -200,12 +224,12 @@ func (a *App) Connect(role, signalingURL, sessionID string) error {
 			Type:    "ice_candidate",
 			Payload: candJSON,
 		})
-		a.sigConn.WriteMessage(websocket.TextMessage, msg)
+		_ = a.writeSignal(msg)
 	})
 
 	go a.readSignaling()
 
-	if role == "phone" {
+	if role == RolePhone {
 		offer, err := pc.CreateOffer(nil)
 		if err != nil {
 			return err
@@ -218,7 +242,7 @@ func (a *App) Connect(role, signalingURL, sessionID string) error {
 			Type:    "offer",
 			Payload: offerJSON,
 		})
-		a.sigConn.WriteMessage(websocket.TextMessage, msg)
+		_ = a.writeSignal(msg)
 	}
 
 	return nil
@@ -236,13 +260,17 @@ func (a *App) SendCommand(cmdJSON string) error {
 func (a *App) setupDataChannel(dc *webrtc.DataChannel) {
 	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
 		// 如果是文本消息，作为控制指令处理；二进制消息为屏幕帧（忽略，本端不需要渲染）
-		if msg.IsString {
+		if msg.IsString && a.getRole() == RoleComputer {
 			a.handleCommand(string(msg.Data))
 		}
 	})
 
 	// 作为被控端（computer），当 DataChannel 开启后开始推送屏幕帧
 	dc.OnOpen(func() {
+		if a.getRole() != RoleComputer {
+			log.Printf("[App] DataChannel 已开启，当前角色无需推送屏幕")
+			return
+		}
 		log.Printf("[App] DataChannel 已开启，开始屏幕捕获推送")
 		a.dc = dc
 		go ScreenCapture(func(frame []byte) {
@@ -384,7 +412,7 @@ func (a *App) readSignaling() {
 			a.pc.SetLocalDescription(answer)
 			ansJSON, _ := json.Marshal(answer)
 			msg, _ := json.Marshal(envelope{Type: "answer", Payload: ansJSON})
-			a.sigConn.WriteMessage(websocket.TextMessage, msg)
+			_ = a.writeSignal(msg)
 
 		case "answer":
 			if a.pc == nil {
@@ -399,7 +427,12 @@ func (a *App) readSignaling() {
 				continue
 			}
 			var cand webrtc.ICECandidateInit
-			json.Unmarshal(env.Payload, &cand)
+			if err := json.Unmarshal(env.Payload, &cand); err != nil {
+				var candText string
+				if json.Unmarshal(env.Payload, &candText) == nil {
+					_ = json.Unmarshal([]byte(candText), &cand)
+				}
+			}
 			a.pc.AddICECandidate(cand)
 
 		case "peer_joined":
@@ -410,7 +443,9 @@ func (a *App) readSignaling() {
 		// 控制指令通过信令 WebSocket 转发到达此处。
 		// 复用 handleCommand 确保与 DataChannel 走同一套 DPI 换算逻辑。
 		case "MOUSE_MOVE", "MOUSE_CLICK", "KEY_PRESS", "SCROLL":
-			a.handleCommand(string(raw))
+			if a.getRole() == RoleComputer {
+				a.handleCommand(string(raw))
+			}
 		}
 	}
 }

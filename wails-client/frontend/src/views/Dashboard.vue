@@ -9,7 +9,7 @@
 
     <section class="card">
       <label class="label-sm">信令服务器</label>
-      <input v-model="serverAddr" class="input-server" placeholder="ws://localhost:8080" />
+      <input v-model="serverAddr" class="input-server" placeholder="wss://161.153.98.231:8443" />
     </section>
 
     <section class="card">
@@ -38,7 +38,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
-import { getDefaultSignalServer } from '../utils/signal'
+import { DEFAULT_SIGNAL_SERVER, getDefaultSignalServer } from '../utils/signal'
 
 const go = (window as any).go
 const app = go?.main?.App
@@ -49,7 +49,7 @@ const connecting = ref(false)
 const devices = ref<{ id: string; name: string; status: string }[]>([])
 
 /* 服务端地址默认为本机，用户可根据实际局域网 IP 修改 */
-const serverAddr = ref(getDefaultSignalServer() || 'ws://localhost:8080')
+const serverAddr = ref(getDefaultSignalServer() || DEFAULT_SIGNAL_SERVER)
 
 function copyCode() {
   navigator.clipboard?.writeText(sessionId.value)

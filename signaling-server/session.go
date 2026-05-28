@@ -127,6 +127,10 @@ func (h *Hub) assignPeer(sid string, p *peer) {
 		case partner.send <- outgoingMsg{msgType: websocket.TextMessage, data: notif}:
 		default:
 		}
+		select {
+		case p.send <- outgoingMsg{msgType: websocket.TextMessage, data: notif}:
+		default:
+		}
 		log.Printf("[Hub] 会话 %s: 双方均已就绪，发送 peer_joined", sid)
 	}
 }
@@ -267,8 +271,15 @@ func serveWS(hub *Hub, w http.ResponseWriter, r *http.Request, role string) {
 				Payload json.RawMessage `json:"payload"`
 			}
 			if json.Unmarshal(msg.Payload, &inner) == nil {
-				// 内层 payload 以原始 JSON 字节转发（零拷贝 RawMessage）
-				hub.forwardWithType(sid, inner.From, []byte(inner.Payload), websocket.TextMessage)
+				payload := []byte(inner.Payload)
+				if len(payload) > 0 && payload[0] == '"' {
+					var text string
+					if json.Unmarshal(inner.Payload, &text) == nil {
+						payload = []byte(text)
+					}
+				}
+				// 内层 payload 以原始 JSON 字节转发；兼容前端传字符串化 JSON 的情况。
+				hub.forwardWithType(sid, inner.From, payload, websocket.TextMessage)
 				continue
 			}
 		}

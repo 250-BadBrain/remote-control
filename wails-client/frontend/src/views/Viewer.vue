@@ -24,7 +24,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
-import { getDefaultSignalServer } from '../utils/signal'
+import { DEFAULT_SIGNAL_SERVER, getDefaultSignalServer } from '../utils/signal'
 
 /* ---- 连接退化模式 ---- */
 /*
@@ -40,7 +40,7 @@ const connectionMode = ref<ConnMode>('connecting')
 
 const params = new URLSearchParams(window.location.hash.split('?')[1] || '')
 const roomCode = params.get('code') || ''
-const signalAddr = (params.get('signal') || getDefaultSignalServer() || 'ws://localhost:8080').replace(/\/+$/, '')
+const signalAddr = (params.get('signal') || getDefaultSignalServer() || DEFAULT_SIGNAL_SERVER).replace(/\/+$/, '')
 
 const canvasRef = ref<HTMLCanvasElement | null>(null)
 const coords = ref('x: 0.000  y: 0.000')
@@ -105,7 +105,10 @@ function onSignalMessage(msg: { type: string; payload?: any }) {
       return
 
     case 'ice_candidate':
-      if (pc && msg.payload) pc.addIceCandidate(JSON.parse(msg.payload)).catch(() => {})
+      if (pc && msg.payload) {
+        const candidate = typeof msg.payload === 'string' ? JSON.parse(msg.payload) : msg.payload
+        pc.addIceCandidate(candidate).catch(() => {})
+      }
       return
   }
 }
@@ -132,7 +135,7 @@ function startWebRTC() {
 
   pc.onicecandidate = (evt) => {
     if (evt.candidate) {
-      sendToSignal(buildEnv('ice_candidate', JSON.stringify(evt.candidate.toJSON())))
+      sendToSignal(buildEnv('ice_candidate', evt.candidate.toJSON()))
     }
   }
 
@@ -268,12 +271,12 @@ function ratios(e: MouseEvent) {
 }
 
 function sendCommand(type: string, data: unknown) {
-  const payload = buildEnv(type, data)
+  const payload = { type, payload: data }
   /* 退化顺位感知：中继模式或 DC 未就绪 -> WebSocket 转发 */
   if (connectionMode.value === 'relay' || dc?.readyState !== 'open') {
     sendToSignal(buildEnv('forward', { from: 'phone', payload }))
   } else {
-    dc.send(payload)
+    dc.send(JSON.stringify(payload))
   }
 }
 

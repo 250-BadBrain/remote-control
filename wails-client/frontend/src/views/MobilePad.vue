@@ -4,7 +4,7 @@
     <div v-if="!connected" class="connect-form">
       <h1>远程控制</h1>
       <input v-model="inputCode" placeholder="输入 6 位房间码" maxlength="6" class="code-input" />
-      <input v-model="inputServer" placeholder="信令服务器地址 (默认 ws://电脑IP:8080)" class="server-input" />
+      <input v-model="inputServer" placeholder="信令服务器地址 (默认 wss://161.153.98.231:8443)" class="server-input" />
       <button @click="doConnect" class="btn-connect">连接</button>
       <p v-if="errorMsg" class="error">{{ errorMsg }}</p>
     </div>
@@ -43,7 +43,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, nextTick } from 'vue'
 import nipplejs from 'nipplejs'
-import { getDefaultSignalServer } from '../utils/signal'
+import { DEFAULT_SIGNAL_SERVER, getDefaultSignalServer } from '../utils/signal'
 
 /* ---- 退化模式 ---- */
 type ConnMode = 'connecting' | 'webrtc' | 'relay'
@@ -51,7 +51,7 @@ const connectionMode = ref<ConnMode>('connecting')
 
 /* ---- 连接参数 ---- */
 const inputCode = ref('')
-const inputServer = ref(getDefaultSignalServer() || 'ws://localhost:8080')
+const inputServer = ref(getDefaultSignalServer() || DEFAULT_SIGNAL_SERVER)
 const errorMsg = ref('')
 const connected = ref(false)
 const sessionId = ref('')
@@ -87,7 +87,7 @@ function doConnect() {
     errorMsg.value = '请输入有效的 6 位房间码'
     return
   }
-  let addr = (inputServer.value.trim() || 'ws://localhost:8080').replace(/\/+$/, '')
+  let addr = (inputServer.value.trim() || DEFAULT_SIGNAL_SERVER).replace(/\/+$/, '')
   errorMsg.value = ''
   connect(code, addr)
 }
@@ -128,7 +128,10 @@ function onSignalMessage(msg: { type: string; payload?: any }) {
       handleAnswer(msg.payload)
       return
     case 'ice_candidate':
-      if (pc && msg.payload) pc.addIceCandidate(JSON.parse(msg.payload)).catch(() => {})
+      if (pc && msg.payload) {
+        const candidate = typeof msg.payload === 'string' ? JSON.parse(msg.payload) : msg.payload
+        pc.addIceCandidate(candidate).catch(() => {})
+      }
       return
   }
 }
@@ -154,7 +157,7 @@ function startWebRTC() {
 
   pc.onicecandidate = (evt) => {
     if (evt.candidate) {
-      sendToSignal(buildEnv('ice_candidate', JSON.stringify(evt.candidate.toJSON())))
+      sendToSignal(buildEnv('ice_candidate', evt.candidate.toJSON()))
     }
   }
 
@@ -231,11 +234,11 @@ async function onVideoFrame(blob: Blob) {
 
 /* ---- 发送控制指令（退化感知） ---- */
 function sendCommand(type: string, data: unknown) {
-  const payload = buildEnv(type, data)
+  const payload = { type, payload: data }
   if (connectionMode.value === 'relay' || dc?.readyState !== 'open') {
     sendToSignal(buildEnv('forward', { from: 'phone', payload }))
   } else {
-    dc.send(payload)
+    dc.send(JSON.stringify(payload))
   }
 }
 

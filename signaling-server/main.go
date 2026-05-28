@@ -52,7 +52,7 @@ func main() {
 		})
 	}
 
-	addr := ":8080"
+	addr := ":8443"
 	log.Printf("[Server] 信令服务器启动于 %s (HTTPS)", addr)
 	log.Fatalf("服务器启动失败: %v", http.ListenAndServeTLS(addr, "server.crt", "server.key", nil))
 }
