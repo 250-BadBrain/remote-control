@@ -13,6 +13,7 @@ import (
 
 	"github.com/go-vgo/robotgo"
 	"github.com/gorilla/websocket"
+	"github.com/kbinani/screenshot"
 	"github.com/pion/webrtc/v3"
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 	"golang.org/x/sys/windows"
@@ -69,6 +70,24 @@ func getDPIScale() float64 {
 	return float64(dpi) / 96.0
 }
 
+func enableDPIAwareness() {
+	user32 := windows.NewLazySystemDLL("user32.dll")
+	if proc := user32.NewProc("SetProcessDpiAwarenessContext"); proc.Find() == nil {
+		// DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+		proc.Call(^uintptr(3))
+		return
+	}
+	if proc := user32.NewProc("SetProcessDPIAware"); proc.Find() == nil {
+		proc.Call()
+	}
+}
+
+func setCursorPos(x, y int) {
+	user32 := windows.NewLazySystemDLL("user32.dll")
+	proc := user32.NewProc("SetCursorPos")
+	proc.Call(uintptr(x), uintptr(y))
+}
+
 // ---------- App ----------
 type App struct {
 	ctx                 context.Context
@@ -113,6 +132,7 @@ func (a *App) GetInsecureTLS() bool {
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	setupClientLog()
+	enableDPIAwareness()
 
 	// 获取物理分辨率
 	a.screenW, a.screenH = robotgo.GetScreenSize()
@@ -458,30 +478,32 @@ func (a *App) handleCommand(raw string) {
 }
 
 func (a *App) execMouseMove(d mouseMoveData) {
-	// 核查点二：动态分辨率感知 + 物理边界钳位
-	//
-	// 受控端可能正在拔插显示器、切换分辨率，我们不能依赖
-	// startup 时缓存的 screenW/screenH，必须在每次执行前
-	// 获取当前主屏幕的物理尺寸。
-	currentW, currentH := robotgo.GetScreenSize()
-
-	x := int(d.XRatio * float64(currentW))
-	y := int(d.YRatio * float64(currentH))
-
-	// 严格钳位：max(0, min(x, currentW-1))
-	// 杜绝负数或越界坐标，防止驱动层崩溃
-	if x < 0 {
-		x = 0
-	} else if x >= currentW {
-		x = currentW - 1
-	}
-	if y < 0 {
-		y = 0
-	} else if y >= currentH {
-		y = currentH - 1
+	bounds := screenshot.GetDisplayBounds(0)
+	w := bounds.Dx()
+	h := bounds.Dy()
+	if w <= 0 || h <= 0 {
+		w, h = robotgo.GetScreenSize()
+		bounds.Min.X = 0
+		bounds.Min.Y = 0
+		bounds.Max.X = w
+		bounds.Max.Y = h
 	}
 
-	robotgo.MoveMouse(x, y)
+	x := bounds.Min.X + int(d.XRatio*float64(w))
+	y := bounds.Min.Y + int(d.YRatio*float64(h))
+
+	if x < bounds.Min.X {
+		x = bounds.Min.X
+	} else if x >= bounds.Max.X {
+		x = bounds.Max.X - 1
+	}
+	if y < bounds.Min.Y {
+		y = bounds.Min.Y
+	} else if y >= bounds.Max.Y {
+		y = bounds.Max.Y - 1
+	}
+
+	setCursorPos(x, y)
 }
 
 func (a *App) execMouseClick(d mouseClickData) {

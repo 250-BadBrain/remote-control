@@ -229,8 +229,12 @@ async function onVideoFrame(blob: Blob) {
       const ctx = canvas.getContext('2d')
       if (!ctx) { bitmap.close(); return }
 
-      canvas.width = canvas.clientWidth
-      canvas.height = canvas.clientHeight
+      if (canvas.width !== canvas.clientWidth || canvas.height !== canvas.clientHeight) {
+        canvas.width = canvas.clientWidth
+        canvas.height = canvas.clientHeight
+      }
+      ctx.imageSmoothingEnabled = true
+      ctx.imageSmoothingQuality = 'high'
       const scale = Math.min(canvas.width / bitmap.width, canvas.height / bitmap.height)
       const dx = (canvas.width - bitmap.width * scale) / 2
       const dy = (canvas.height - bitmap.height * scale) / 2

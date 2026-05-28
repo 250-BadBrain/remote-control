@@ -256,7 +256,7 @@ func serveWS(hub *Hub, w http.ResponseWriter, r *http.Request, role string) {
 		close(p.latestFrame)
 	}()
 
-	conn.SetReadLimit(2 << 20)
+	conn.SetReadLimit(4 << 20)
 	_ = conn.SetReadDeadline(time.Now().Add(wsPongWait))
 	conn.SetPongHandler(func(string) error {
 		return conn.SetReadDeadline(time.Now().Add(wsPongWait))

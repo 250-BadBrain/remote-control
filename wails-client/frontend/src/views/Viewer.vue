@@ -230,6 +230,8 @@ function drawFrame(bitmap: ImageBitmap) {
     canvas.height = canvas.clientHeight
   }
 
+  ctx.imageSmoothingEnabled = true
+  ctx.imageSmoothingQuality = 'high'
   const scale = Math.min(canvas.width / bitmap.width, canvas.height / bitmap.height)
   const dx = (canvas.width - bitmap.width * scale) / 2
   const dy = (canvas.height - bitmap.height * scale) / 2
