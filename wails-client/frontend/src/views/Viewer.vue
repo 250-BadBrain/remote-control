@@ -24,6 +24,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
 import { buildIceServers } from '../utils/ice'
+import { handleIncomingFrame } from '../utils/frame'
 import { DEFAULT_SIGNAL_SERVER, getDefaultSignalServer } from '../utils/signal'
 
 /* ---- 杩炴帴閫€鍖栨ā寮?---- */
@@ -77,12 +78,12 @@ function connect() {
   ws.onmessage = (evt: MessageEvent) => {
     if (evt.data instanceof Blob) {
       connectionMode.value = 'relay'
-      onVideoFrame(evt.data)
+      handleIncomingFrame(evt.data, onVideoFrame)
       return
     }
     if (evt.data instanceof ArrayBuffer) {
       connectionMode.value = 'relay'
-      onVideoFrame(new Blob([evt.data], { type: 'image/jpeg' }))
+      handleIncomingFrame(evt.data, onVideoFrame)
       return
     }
     try {
@@ -138,20 +139,12 @@ function handleDisconnected(reason: string) {
   pc = null
 }
 
-function onIncomingFrame(data: unknown) {
-  if (data instanceof Blob) {
-    onVideoFrame(data)
-    return
-  }
-  if (data instanceof ArrayBuffer) {
-    onVideoFrame(new Blob([data], { type: 'image/jpeg' }))
-  }
-}
-
 /* ---- WebRTC锛堥粍閲戦€€鍖栭『浣?1-3锛?---- */
 function startWebRTC() {
+  const iceServers = buildIceServers()
+  console.info('[Viewer] ICE servers:', iceServers.map((s) => s.urls))
   const cfg: RTCConfiguration = {
-    iceServers: buildIceServers(),
+    iceServers,
     iceTransportPolicy: 'all',
   }
   pc = new RTCPeerConnection(cfg)
@@ -169,9 +162,16 @@ function startWebRTC() {
     }
   }
 
+  pc.oniceconnectionstatechange = () => {
+    console.info('[Viewer] ICE state:', pc?.iceConnectionState)
+  }
+
   pc.onicecandidate = (evt) => {
     if (evt.candidate) {
+      console.info('[Viewer] local ICE candidate:', evt.candidate.type, evt.candidate.protocol, evt.candidate.address, evt.candidate.port)
       sendToSignal(buildEnv('ice_candidate', evt.candidate.toJSON()))
+    } else {
+      console.info('[Viewer] ICE gathering completed')
     }
   }
 
@@ -187,7 +187,7 @@ function startWebRTC() {
     connectionMode.value = 'relay'
   }
   dc.onmessage = (evt: MessageEvent) => {
-    onIncomingFrame(evt.data)
+    handleIncomingFrame(evt.data, onVideoFrame)
   }
 
   /* 5 绉掕秴鏃讹細鑻?WebRTC 鏈湪姝ゆ椂闄愬唴寤虹珛杩炴帴鍒欒浆鍏ヤ腑缁?*/
@@ -308,8 +308,10 @@ function sendCommand(type: string, data: unknown) {
   const payload = { type, payload: data }
   /* 閫€鍖栭『浣嶆劅鐭ワ細涓户妯″紡鎴?DC 鏈氨缁?-> WebSocket 杞彂 */
   if (connectionMode.value === 'relay' || dc?.readyState !== 'open') {
+    console.debug('[Viewer] send relay command:', type)
     sendToSignal(buildEnv('forward', { from: 'phone', payload }))
   } else {
+    console.debug('[Viewer] send datachannel command:', type)
     dc.send(JSON.stringify(payload))
   }
 }

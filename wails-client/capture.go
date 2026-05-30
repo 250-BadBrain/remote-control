@@ -22,12 +22,12 @@ const (
 func ScreenCapture(sendFrame func([]byte) bool) {
 	n := screenshot.NumActiveDisplays()
 	if n == 0 {
-		log.Fatal("[Capture] 未发现活动显示器")
+		log.Fatal("[Capture] no active display found")
 	}
-	log.Printf("[Capture] %d 个活动显示器", n)
+	log.Printf("[Capture] active displays: %d", n)
 
 	bounds := screenshot.GetDisplayBounds(0)
-	log.Printf("[Capture] 主显示器 %dx%d", bounds.Dx(), bounds.Dy())
+	log.Printf("[Capture] primary display: %dx%d", bounds.Dx(), bounds.Dy())
 
 	frameInterval := time.Second / captureFPS
 	ticker := time.NewTicker(frameInterval)
@@ -36,16 +36,16 @@ func ScreenCapture(sendFrame func([]byte) bool) {
 	for range ticker.C {
 		img, err := screenshot.CaptureRect(bounds)
 		if err != nil {
-			log.Printf("[Capture] 捕获错误: %v", err)
+			log.Printf("[Capture] capture error: %v", err)
 			continue
 		}
 		frame, err := compressJPEG(img)
 		if err != nil {
-			log.Printf("[Capture] JPEG 编码错误: %v", err)
+			log.Printf("[Capture] jpeg encode error: %v", err)
 			continue
 		}
 		if !sendFrame(frame.Bytes()) {
-			log.Printf("[Capture] 停止屏幕捕获")
+			log.Printf("[Capture] stop screen capture")
 			return
 		}
 	}

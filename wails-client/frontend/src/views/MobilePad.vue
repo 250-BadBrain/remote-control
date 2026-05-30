@@ -44,6 +44,7 @@
 import { ref, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import nipplejs from 'nipplejs'
 import { buildIceServers } from '../utils/ice'
+import { handleIncomingFrame } from '../utils/frame'
 import { DEFAULT_SIGNAL_SERVER, getDefaultSignalServer } from '../utils/signal'
 
 /* ---- 退化模式 ---- */
@@ -107,12 +108,12 @@ function connect(code: string, addr: string) {
   ws.onmessage = (evt: MessageEvent) => {
     if (evt.data instanceof Blob) {
       connectionMode.value = 'relay'
-      onVideoFrame(evt.data)
+      handleIncomingFrame(evt.data, onVideoFrame)
       return
     }
     if (evt.data instanceof ArrayBuffer) {
       connectionMode.value = 'relay'
-      onVideoFrame(new Blob([evt.data], { type: 'image/jpeg' }))
+      handleIncomingFrame(evt.data, onVideoFrame)
       return
     }
     try {
@@ -166,20 +167,12 @@ function handleDisconnected(reason: string) {
   pc = null
 }
 
-function onIncomingFrame(data: unknown) {
-  if (data instanceof Blob) {
-    onVideoFrame(data)
-    return
-  }
-  if (data instanceof ArrayBuffer) {
-    onVideoFrame(new Blob([data], { type: 'image/jpeg' }))
-  }
-}
-
 /* ---- WebRTC (phone 端，黄金退化顺位 1-3) ---- */
 function startWebRTC() {
+  const iceServers = buildIceServers()
+  console.info('[Mobile] ICE servers:', iceServers.map((s) => s.urls))
   const cfg: RTCConfiguration = {
-    iceServers: buildIceServers(),
+    iceServers,
     iceTransportPolicy: 'all',
   }
   pc = new RTCPeerConnection(cfg)
@@ -196,9 +189,16 @@ function startWebRTC() {
     }
   }
 
+  pc.oniceconnectionstatechange = () => {
+    console.info('[Mobile] ICE state:', pc?.iceConnectionState)
+  }
+
   pc.onicecandidate = (evt) => {
     if (evt.candidate) {
+      console.info('[Mobile] local ICE candidate:', evt.candidate.type, evt.candidate.protocol, evt.candidate.address, evt.candidate.port)
       sendToSignal(buildEnv('ice_candidate', evt.candidate.toJSON()))
+    } else {
+      console.info('[Mobile] ICE gathering completed')
     }
   }
 
@@ -213,7 +213,7 @@ function startWebRTC() {
     connectionMode.value = 'relay'
   }
   dc.onmessage = (evt: MessageEvent) => {
-    onIncomingFrame(evt.data)
+    handleIncomingFrame(evt.data, onVideoFrame)
   }
 
   /* 5 秒握手超时 -> 中继 */
@@ -279,8 +279,10 @@ async function onVideoFrame(blob: Blob) {
 function sendCommand(type: string, data: unknown) {
   const payload = { type, payload: data }
   if (connectionMode.value === 'relay' || dc?.readyState !== 'open') {
+    console.debug('[Mobile] send relay command:', type)
     sendToSignal(buildEnv('forward', { from: 'phone', payload }))
   } else {
+    console.debug('[Mobile] send datachannel command:', type)
     dc.send(JSON.stringify(payload))
   }
 }

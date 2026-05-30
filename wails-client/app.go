@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"encoding/binary"
 	"encoding/json"
 	"log"
 	"net/url"
@@ -43,6 +44,12 @@ var defaultTURNURLs = []string{
 	"turn:turn.h2seo4.win:3478?transport=tcp",
 }
 
+const (
+	frameChunkMagic   uint32 = 0x52434631 // "RCF1"
+	frameChunkHeader         = 12
+	frameChunkPayload        = 60 * 1024
+)
+
 type mouseMoveData struct {
 	XRatio float64 `json:"xRatio"`
 	YRatio float64 `json:"yRatio"`
@@ -64,7 +71,7 @@ type scrollData struct {
 
 // ---------- system DPI helpers ----------
 func getDPIScale() float64 {
-	// 闂傚洠鍋撻悷?Windows 8.1 濞寸姰鍎扮粭鍌炴晬鐏炶姤绀€闂侇偀鍋撳☉?1.0
+	// 闂傚倸娲犻崑鎾绘偡?Windows 8.1 婵炲濮伴崕鎵箔閸岀偞鏅悘鐐跺Г缁€鈧梻渚囧亐閸嬫挸鈽?1.0
 	dll := windows.NewLazySystemDLL("user32.dll")
 	procDPI := dll.NewProc("GetDpiForWindow")
 	procDesktop := dll.NewProc("GetDesktopWindow")
@@ -109,6 +116,7 @@ func buildICEServers() []webrtc.ICEServer {
 	}
 	credential := strings.TrimSpace(os.Getenv("TURN_PASSWORD"))
 	if credential == "" {
+		log.Printf("[ICE] TURN disabled: TURN_PASSWORD is not set")
 		return servers
 	}
 
@@ -123,6 +131,7 @@ func buildICEServers() []webrtc.ICEServer {
 		Credential:     credential,
 		CredentialType: webrtc.ICECredentialTypePassword,
 	})
+	log.Printf("[ICE] TURN enabled: urls=%v username=%s", urls, username)
 	return servers
 }
 
@@ -183,12 +192,12 @@ func (a *App) startup(ctx context.Context) {
 	setupClientLog()
 	enableDPIAwareness()
 
-	// 闁兼儳鍢茶ぐ鍥偋閳哄啯鍊為柛鎺戞妞存悂鎮?	a.screenW, a.screenH = robotgo.GetScreenSize()
-	// 闁兼儳鍢茶ぐ?DPI 缂傚倵鏅滈弬?	a.dpiScale = getDPIScale()
-	// 閻犱緤绱曢悾濠氭焻閺勫繒甯嗛柛鎺戞妞存悂鎮?	a.logicalW = int(float64(a.screenW) / a.dpiScale)
+	// 闂佸吋鍎抽崲鑼躲亹閸ヮ剚鍋嬮柍鍝勫暞閸婄偤鏌涢幒鎴烆棥濡炲瓨鎮傞幃?	a.screenW, a.screenH = robotgo.GetScreenSize()
+	// 闂佸吋鍎抽崲鑼躲亹?DPI 缂傚倸鍊甸弲婊堝棘?	a.dpiScale = getDPIScale()
+	// 闁荤姳绶ょ槐鏇㈡偩婵犳碍鐒婚柡鍕箳鐢棝鏌涢幒鎴烆棥濡炲瓨鎮傞幃?	a.logicalW = int(float64(a.screenW) / a.dpiScale)
 	a.logicalH = int(float64(a.screenH) / a.dpiScale)
 
-	log.Printf("[App] 闁绘せ鏅濋幃?%dx%d  闂侇偅妲掔欢?%dx%d  DPI=%.2f",
+	log.Printf("[App] screen physical=%dx%d logical=%dx%d dpiScale=%.2f",
 		a.screenW, a.screenH, a.logicalW, a.logicalH, a.dpiScale)
 }
 
@@ -204,7 +213,7 @@ func setupClientLog() {
 	}
 	log.SetOutput(logFile)
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
-	log.Printf("[App] 闁哄啨鍎辩换鏃堝棘閸ワ附顐? %s", logPath)
+	log.Printf("[App] log file: %s", logPath)
 }
 
 // ---------- Wails bindings ----------
@@ -287,12 +296,12 @@ func (a *App) Connect(role, signalingURL, sessionID string) error {
 	}
 	a.sigConn = conn
 
-	// ---- 濞村吋锚鐎靛弶绋夐埀顒勬晬濞嗙硟E 闂佹澘绉堕悿鍡涙晬閸︾嚄N / IPv6 / TURN 濡澘瀚弳鈧柨?----
+	// ---- 婵炴潙鍚嬮敋閻庨潧寮剁粙澶愬焵椤掑嫭鏅繛鍡欑E 闂備焦婢樼粔鍫曟偪閸℃稒鏅柛锔惧殑N / IPv6 / TURN 婵☆偅婢樼€氼噣寮抽埀顒勬煥?----
 	config := webrtc.Configuration{
 		ICEServers: buildICEServers(),
 	}
 
-	// 濞达綀娉曢弫?SettingEngine 闁哄嫭鍎崇槐鈥愁嚕閳ь剟宕ラ姘辨拱闁糕晝鍠撶紞澶愬椽?IPv6 闁稿﹥鐟╅埀顒€顦﹢鎾锤閳ь剟寮ㄩ崼鏇熻偁
+	// 婵炶揪缍€濞夋洟寮?SettingEngine 闂佸搫瀚崕宕囨閳ユ剚鍤曢柍褜鍓熷畷銉╊敍濮樿鲸鎷遍梺绯曟櫇閸犳挾绱炴径鎰そ?IPv6 闂佺锕ラ悷鈺呭焵椤掆偓椤︻垰锕㈤幘顔奸敜闁逞屽墴瀵劑宕奸弴鐔诲亖
 	engine := webrtc.SettingEngine{}
 	engine.SetNetworkTypes([]webrtc.NetworkType{
 		webrtc.NetworkTypeUDP4,
@@ -342,9 +351,12 @@ func (a *App) Connect(role, signalingURL, sessionID string) error {
 
 	pc.OnICECandidate(func(c *webrtc.ICECandidate) {
 		if c == nil {
+			log.Printf("[ICE] local candidate gathering complete")
 			return
 		}
-		candJSON, _ := json.Marshal(c.ToJSON())
+		candidate := c.ToJSON()
+		log.Printf("[ICE] local candidate: %s", candidate.Candidate)
+		candJSON, _ := json.Marshal(candidate)
 		msg, _ := json.Marshal(envelope{
 			Type:    "ice_candidate",
 			Payload: candJSON,
@@ -397,13 +409,13 @@ func (a *App) setupDataChannel(dc *webrtc.DataChannel) {
 	})
 
 	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-		// 濠碘€冲€归悘澶愬及椤栨稒鐎柡鍫墯缁夌兘骞侀銈囩濞达絾绮堢拹鐔煎箳瑜嶉崺妤呭箰閸ワ附濮㈠璺哄閹﹪鏁嶅☉妤冪檶閺夆晜绋戦崺妤€鈽夐崼鐔剁礀濞戞挸鎼惈鍡涚嵁閺囩偞濮庨柨娑樼墕閹风兘鎮鹃妷顖滅闁哄牜鍓涢顒佺▔瀹ュ浠橀悷鏇氱劍鐟曞棝寮婚幙鍕
 		if msg.IsString && a.getRole() == RoleComputer {
+			log.Printf("[Command] received via DataChannel: %s", string(msg.Data))
 			a.handleCommand(string(msg.Data))
 		}
 	})
 
-	// 濞达絾绮堢拹鐔烘偖椤愶絽浠樼紒鏃戝灲缁辨獑omputer闁挎稑顧€缁辨繆銇?DataChannel 鐎殿喒鍋撻柛姘煎灠閹顕ｉ埀顒佹叏鐎ｎ偄鑵归梺顐＄閻棝鐛弴鐐村
+	// 婵炶揪绲剧划鍫㈡嫻閻旂儤鍋栨い鎰剁到娴犳绱掗弮鎴濈伈缂佽鲸鐛憃mputer闂佹寧绋戦¨鈧紒杈ㄧ箚閵?DataChannel 閻庢鍠掗崑鎾绘煕濮樼厧鐏犻柟顔筋殔椤曪綁鍩€椤掍焦鍙忛悗锝庡亜閼靛綊姊洪锛勵槮闁活偄妫濋悰顕€寮撮悙鏉戭潛
 	dc.OnOpen(func() {
 		a.setPeerConnected(true)
 		if a.getRole() != RoleComputer {
@@ -414,6 +426,7 @@ func (a *App) setupDataChannel(dc *webrtc.DataChannel) {
 		a.dc = dc
 		go func() {
 			sent := 0
+			frameID := uint32(0)
 			ScreenCapture(func(frame []byte) bool {
 				if dc.ReadyState() != webrtc.DataChannelStateOpen {
 					return false
@@ -421,18 +434,48 @@ func (a *App) setupDataChannel(dc *webrtc.DataChannel) {
 				if dc.BufferedAmount()+uint64(len(frame)) > 2*1024*1024 {
 					return true
 				}
-				if err := dc.Send(frame); err != nil {
-					log.Printf("[App] 闁告瑦鍨块埀顑跨閹舵碍寰勬潏顐バ? %v", err)
+				frameID++
+				if err := sendFrameDataChannel(dc, frameID, frame); err != nil {
+					log.Printf("[App] datachannel frame send failed: %v", err)
 					return false
 				}
 				sent++
 				if sent == 1 || sent%50 == 0 {
-					log.Printf("[App] 鐎瑰憡褰冭ぐ鍌炴焻娴ｅ摜娼屾鐐存礀閹?%d闁挎稑鑻紞瀣礈瀹ュ懏濮?%d bytes", sent, len(frame))
+					log.Printf("[App] datachannel frames sent=%d frameBytes=%d", sent, len(frame))
 				}
 				return true
 			})
 		}()
 	})
+}
+
+func sendFrameDataChannel(dc *webrtc.DataChannel, frameID uint32, frame []byte) error {
+	if len(frame) <= frameChunkPayload {
+		return dc.Send(frame)
+	}
+
+	total := (len(frame) + frameChunkPayload - 1) / frameChunkPayload
+	if total > 65535 {
+		return dc.Send(frame)
+	}
+
+	for index := 0; index < total; index++ {
+		start := index * frameChunkPayload
+		end := start + frameChunkPayload
+		if end > len(frame) {
+			end = len(frame)
+		}
+		chunk := make([]byte, frameChunkHeader+end-start)
+		binary.BigEndian.PutUint32(chunk[0:4], frameChunkMagic)
+		binary.BigEndian.PutUint32(chunk[4:8], frameID)
+		binary.BigEndian.PutUint16(chunk[8:10], uint16(total))
+		binary.BigEndian.PutUint16(chunk[10:12], uint16(index))
+		copy(chunk[frameChunkHeader:], frame[start:end])
+		if err := dc.Send(chunk); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (a *App) startRelayCapture() {
@@ -598,7 +641,7 @@ func (a *App) readSignaling() {
 			var sid string
 			json.Unmarshal(env.Payload, &sid)
 			a.sessionID = sid
-			log.Printf("[App] 闁哄牆绉存慨鐔煎闯閵娿儱鐎婚梺鏉跨У閸┭囨⒒鐎靛摜鍨? %s", sid)
+			log.Printf("[Signal] session assigned: %s", sid)
 
 		case "offer":
 			if a.pc == nil {
@@ -634,6 +677,7 @@ func (a *App) readSignaling() {
 					_ = json.Unmarshal([]byte(candText), &cand)
 				}
 			}
+			log.Printf("[ICE] remote candidate: %s", cand.Candidate)
 			a.pc.AddICECandidate(cand)
 
 		case "peer_joined":
@@ -647,9 +691,9 @@ func (a *App) readSignaling() {
 			log.Printf("[App] peer left session %s: %s", a.sessionID, leftRole)
 			a.setPeerConnected(false)
 
-			// 闁冲厜鍋撻柍鍏夊亾 濞村吋锚鐎垫煡鏁嶅鎭奲Socket 闁搞儳鍋ら埀顑藉亾闂侇偅宀告禍楣冩儍閸曨剙浠橀柛鎺曞煐鐎垫碍绂?闁冲厜鍋撻柍鍏夊亾
-			// 鐟滅増鎸荤粊鑽ゆ喆閸繃鐝ょ紒?WebRTC DataChannel 闁哄牜浜ｉ崗姗€骞嶉幘鐑╁亾濮橆厽顦ч柨?		// 闁硅矇鍐ㄧ厬闁圭娲ｉ幎銈夋焻濮樺磭绠栧ǎ鍥ｂ偓鍙夊Б WebSocket 閺夌儐鍓欒ぐ鍌炲礆閹峰本褰ф慨婵勫€曢ˇ鈺呭Υ?		// 濠㈣泛绉堕弫?handleCommand 缁绢収鍠曠换姘▔?DataChannel 閻犙勬緲閹挻绋夐埀顒佺附?DPI 闁瑰箍鍨婚悾濠氭焻閺勫繒甯嗛柕?		case "MOUSE_MOVE", "MOUSE_CLICK", "KEY_PRESS", "SCROLL":
+		case "MOUSE_MOVE", "MOUSE_CLICK", "KEY_PRESS", "SCROLL":
 			if a.getRole() == RoleComputer {
+				log.Printf("[Command] received via WebSocket relay: %s", env.Type)
 				a.handleCommand(string(raw))
 			}
 		}
