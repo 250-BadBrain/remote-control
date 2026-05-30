@@ -81,7 +81,7 @@ func (h *Hub) getOrCreateSession(sid string) *session {
 	if !ok {
 		s = &session{id: sid}
 		h.sessions[sid] = s
-		log.Printf("[Hub] 创建新会话 %s", sid)
+		log.Printf("[Hub] 鍒涘缓鏂颁細璇?%s", sid)
 	}
 	return s
 }
@@ -96,7 +96,7 @@ func (h *Hub) removeSession(sid string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	delete(h.sessions, sid)
-	log.Printf("[Hub] 删除会话 %s", sid)
+	log.Printf("[Hub] 鍒犻櫎浼氳瘽 %s", sid)
 }
 
 func (h *Hub) assignPeer(sid string, p *peer) {
@@ -111,7 +111,7 @@ func (h *Hub) assignPeer(sid string, p *peer) {
 		s.phone = p
 	}
 
-	log.Printf("[Hub] 会话 %s: %s 加入 (computer=%v phone=%v)",
+	log.Printf("[Hub] 浼氳瘽 %s: %s 鍔犲叆 (computer=%v phone=%v)",
 		sid, p.role, s.computer != nil, s.phone != nil)
 
 	var partner *peer
@@ -130,7 +130,7 @@ func (h *Hub) assignPeer(sid string, p *peer) {
 		case p.send <- outgoingMsg{msgType: websocket.TextMessage, data: notif}:
 		default:
 		}
-		log.Printf("[Hub] 会话 %s: 双方均已就绪，发送 peer_joined", sid)
+		log.Printf("[Hub] 浼氳瘽 %s: 鍙屾柟鍧囧凡灏辩华锛屽彂閫?peer_joined", sid)
 	}
 }
 
@@ -139,24 +139,36 @@ func (h *Hub) unassignPeer(sid string, p *peer) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	var partner *peer
 	switch p.role {
 	case RoleComputer:
 		s.computer = nil
+		partner = s.phone
 	case RolePhone:
 		s.phone = nil
+		partner = s.computer
 	}
 
 	log.Printf("[Hub] 会话 %s: %s 离开", sid, p.role)
+
+	if partner != nil {
+		payload, _ := json.Marshal(p.role)
+		notif, _ := json.Marshal(envelope{Type: "peer_left", Payload: payload})
+		select {
+		case partner.send <- outgoingMsg{msgType: websocket.TextMessage, data: notif}:
+		default:
+			log.Printf("[Hub] 会话 %s: peer_left 通知发送失败，目标队列满", sid)
+		}
+	}
 
 	if s.computer == nil && s.phone == nil {
 		h.removeSession(sid)
 	}
 }
-
 func (h *Hub) forwardWithType(sid, fromRole string, msg []byte, msgType int) {
 	s := h.getSession(sid)
 	if s == nil {
-		log.Printf("[Hub] 会话 %s 不存在，丢弃消息", sid)
+		log.Printf("[Hub] 浼氳瘽 %s 涓嶅瓨鍦紝涓㈠純娑堟伅", sid)
 		return
 	}
 
@@ -170,7 +182,7 @@ func (h *Hub) forwardWithType(sid, fromRole string, msg []byte, msgType int) {
 		target = s.computer
 	}
 	if target == nil {
-		log.Printf("[Hub] 会话 %s: 无目标(%s 源)，丢弃 %d 字节", sid, fromRole, len(msg))
+		log.Printf("[Hub] 浼氳瘽 %s: 鏃犵洰鏍?%s 婧?锛屼涪寮?%d 瀛楄妭", sid, fromRole, len(msg))
 		return
 	}
 
@@ -182,7 +194,7 @@ func (h *Hub) forwardWithType(sid, fromRole string, msg []byte, msgType int) {
 	select {
 	case target.send <- outgoingMsg{msgType: msgType, data: msg}:
 	default:
-		log.Printf("[Hub] 会话 %s: 目标控制管道满，丢弃 %d 字节", sid, len(msg))
+		log.Printf("[Hub] 浼氳瘽 %s: 鐩爣鎺у埗绠￠亾婊★紝涓㈠純 %d 瀛楄妭", sid, len(msg))
 	}
 }
 
@@ -201,7 +213,7 @@ func (h *Hub) forwardLatestFrame(sid string, target *peer, frame []byte) {
 	select {
 	case target.latestFrame <- frame:
 	default:
-		log.Printf("[Hub] 会话 %s: 目标帧槽位满，丢弃 %d 字节", sid, len(frame))
+		log.Printf("[Hub] 浼氳瘽 %s: 鐩爣甯фЫ浣嶆弧锛屼涪寮?%d 瀛楄妭", sid, len(frame))
 	}
 }
 
@@ -212,18 +224,18 @@ var upgrader = websocket.Upgrader{
 func serveWS(hub *Hub, w http.ResponseWriter, r *http.Request, role string) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("[WS] 升级失败: %v", err)
+		log.Printf("[WS] 鍗囩骇澶辫触: %v", err)
 		return
 	}
 
 	sid := r.URL.Query().Get("sid")
 	if role == RoleComputer && sid == "" {
 		sid = generateRoomCode()
-		log.Printf("[Hub] 为新电脑分配房间码: %s", sid)
+		log.Printf("[Hub] 涓烘柊鐢佃剳鍒嗛厤鎴块棿鐮? %s", sid)
 	}
 
 	if sid == "" {
-		log.Printf("[WS] 拒绝连接: 未提供 sid")
+		log.Printf("[WS] 鎷掔粷杩炴帴: 鏈彁渚?sid")
 		_ = conn.WriteJSON(envelope{Type: "error", Payload: []byte(`"missing session ID"`)})
 		_ = conn.Close()
 		return
@@ -265,7 +277,7 @@ func serveWS(hub *Hub, w http.ResponseWriter, r *http.Request, role string) {
 	for {
 		msgType, raw, err := conn.ReadMessage()
 		if err != nil {
-			log.Printf("[WS] 读取错误 (%s %s): %v", sid, role, err)
+			log.Printf("[WS] 璇诲彇閿欒 (%s %s): %v", sid, role, err)
 			break
 		}
 
@@ -339,7 +351,7 @@ func writePump(conn *websocket.Conn, p *peer, sid, role string) {
 		case <-ticker.C:
 			_ = conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
 			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
-				log.Printf("[WS] ping 错误 (%s %s): %v", sid, role, err)
+				log.Printf("[WS] ping 閿欒 (%s %s): %v", sid, role, err)
 				return
 			}
 		}
@@ -349,7 +361,7 @@ func writePump(conn *websocket.Conn, p *peer, sid, role string) {
 func writeWS(conn *websocket.Conn, sid, role string, msgType int, data []byte) bool {
 	_ = conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
 	if err := conn.WriteMessage(msgType, data); err != nil {
-		log.Printf("[WS] 写入错误 (%s %s): %v", sid, role, err)
+		log.Printf("[WS] 鍐欏叆閿欒 (%s %s): %v", sid, role, err)
 		return false
 	}
 	return true

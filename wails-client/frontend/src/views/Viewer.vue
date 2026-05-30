@@ -1,4 +1,4 @@
-<template>
+﻿<template>
   <div class="viewer" @contextmenu.prevent>
     <canvas ref="canvasRef" class="remote-canvas"
       @mousemove="onMouseMove"
@@ -10,12 +10,11 @@
       <span class="badge" :class="connected ? 'status-ok' : 'status-err'">
         {{ connected ? `已连接 ${sessionId}` : '未连接' }}
       </span>
-      <!-- 中继指示器 -->
       <span v-if="connectionMode === 'relay'" class="badge badge-relay">
-        ⚡ 中继模式
+        中继模式
       </span>
       <span v-else-if="connectionMode === 'connecting'" class="badge badge-wait">
-        ⏳ 直连协商中...
+        直连协商中...
       </span>
       <span class="badge coords">{{ coords }}</span>
     </div>
@@ -27,15 +26,13 @@ import { ref, onMounted, onUnmounted } from 'vue'
 import { buildIceServers } from '../utils/ice'
 import { DEFAULT_SIGNAL_SERVER, getDefaultSignalServer } from '../utils/signal'
 
-/* ---- 连接退化模式 ---- */
+/* ---- 杩炴帴閫€鍖栨ā寮?---- */
 /*
-  黄金退化顺序（WebRTC 标准保证）：
-    第1顺位：LAN host candidate  — ICE 类型优先级 126（最高）
-    第2顺位：IPv6 host candidate  — 同属 host 类型，自动并行探测
-    第3顺位：STUN srflx candidate — 类型优先级 100
-    第4顺位：WebSocket 回退中继   — connectionMode === 'relay'
-  当 WebRTC 连接失败 / 超时时，自动退化到第4顺位。
-*/
+  榛勯噾閫€鍖栭『搴忥紙WebRTC 鏍囧噯淇濊瘉锛夛細
+    绗?椤轰綅锛歀AN host candidate  鈥?ICE 绫诲瀷浼樺厛绾?126锛堟渶楂橈級
+    绗?椤轰綅锛欼Pv6 host candidate  鈥?鍚屽睘 host 绫诲瀷锛岃嚜鍔ㄥ苟琛屾帰娴?    绗?椤轰綅锛歋TUN srflx candidate 鈥?绫诲瀷浼樺厛绾?100
+    绗?椤轰綅锛歐ebSocket 鍥為€€涓户   鈥?connectionMode === 'relay'
+  褰?WebRTC 杩炴帴澶辫触 / 瓒呮椂鏃讹紝鑷姩閫€鍖栧埌绗?椤轰綅銆?*/
 type ConnMode = 'connecting' | 'webrtc' | 'relay'
 const connectionMode = ref<ConnMode>('connecting')
 
@@ -47,6 +44,7 @@ const canvasRef = ref<HTMLCanvasElement | null>(null)
 const coords = ref('x: 0.000  y: 0.000')
 const connected = ref(false)
 const sessionId = ref('')
+const disconnectReason = ref('')
 
 let ws: WebSocket | null = null
 let pc: RTCPeerConnection | null = null
@@ -65,6 +63,7 @@ function sendToSignal(msg: string) {
 function connect() {
   const sid = roomCode || `viewer_${Math.random().toString(36).slice(2, 8)}`
   sessionId.value = sid
+  disconnectReason.value = ''
 
   const url = `${signalAddr}/connect/phone?sid=${encodeURIComponent(sid)}`
   ws = new WebSocket(url)
@@ -93,8 +92,8 @@ function connect() {
   }
 
   ws.onclose = () => {
-    connected.value = false
-    console.log('[Viewer] WebSocket 已断开')
+    handleDisconnected(disconnectReason.value || '信令连接已断开')
+    console.log('[Viewer] WebSocket 宸叉柇寮€')
   }
 }
 
@@ -122,10 +121,34 @@ function onSignalMessage(msg: { type: string; payload?: any }) {
         pc.addIceCandidate(candidate).catch(() => {})
       }
       return
+    case 'peer_left':
+      handleDisconnected('电脑受控端已断开')
+      return
   }
 }
 
-/* ---- WebRTC（黄金退化顺位 1-3） ---- */
+function handleDisconnected(reason: string) {
+  disconnectReason.value = reason
+  connected.value = false
+  connectionMode.value = 'connecting'
+  if (relayTimeout) { clearTimeout(relayTimeout); relayTimeout = null }
+  dc?.close()
+  dc = null
+  pc?.close()
+  pc = null
+}
+
+function onIncomingFrame(data: unknown) {
+  if (data instanceof Blob) {
+    onVideoFrame(data)
+    return
+  }
+  if (data instanceof ArrayBuffer) {
+    onVideoFrame(new Blob([data], { type: 'image/jpeg' }))
+  }
+}
+
+/* ---- WebRTC锛堥粍閲戦€€鍖栭『浣?1-3锛?---- */
 function startWebRTC() {
   const cfg: RTCConfiguration = {
     iceServers: buildIceServers(),
@@ -133,15 +156,15 @@ function startWebRTC() {
   }
   pc = new RTCPeerConnection(cfg)
 
-  /* 状态感知：监听连接状态变化，失败时退化到中继模式 */
+  /* 鐘舵€佹劅鐭ワ細鐩戝惉杩炴帴鐘舵€佸彉鍖栵紝澶辫触鏃堕€€鍖栧埌涓户妯″紡 */
   pc.onconnectionstatechange = () => {
     const state = pc!.connectionState
-    console.log('[Viewer] 连接状态:', state)
+    console.log('[Viewer] 杩炴帴鐘舵€?', state)
     if (state === 'connected') {
       connectionMode.value = 'webrtc'
       if (relayTimeout) { clearTimeout(relayTimeout); relayTimeout = null }
     } else if (state === 'failed' || state === 'disconnected') {
-      console.warn('[Viewer] WebRTC 连接失败，退化到中继模式')
+      console.warn('[Viewer] WebRTC 杩炴帴澶辫触锛岄€€鍖栧埌涓户妯″紡')
       connectionMode.value = 'relay'
     }
   }
@@ -152,32 +175,30 @@ function startWebRTC() {
     }
   }
 
-  /* 屏幕帧通过 DataChannel 二进制传输 */
+  /* 灞忓箷甯ч€氳繃 DataChannel 浜岃繘鍒朵紶杈?*/
   dc = pc.createDataChannel('control')
   dc.binaryType = 'blob'
   dc.onopen = () => {
-    console.log('[Viewer] DataChannel 已打开')
+    console.log('[Viewer] DataChannel 宸叉墦寮€')
     connectionMode.value = 'webrtc'
   }
   dc.onclose = () => {
-    console.warn('[Viewer] DataChannel 关闭，退化到中继')
+    console.warn('[Viewer] DataChannel 鍏抽棴锛岄€€鍖栧埌涓户')
     connectionMode.value = 'relay'
   }
   dc.onmessage = (evt: MessageEvent) => {
-    if (evt.data instanceof Blob) {
-      onVideoFrame(evt.data)
-    }
+    onIncomingFrame(evt.data)
   }
 
-  /* 5 秒超时：若 WebRTC 未在此时限内建立连接则转入中继 */
+  /* 5 绉掕秴鏃讹細鑻?WebRTC 鏈湪姝ゆ椂闄愬唴寤虹珛杩炴帴鍒欒浆鍏ヤ腑缁?*/
   relayTimeout = setTimeout(() => {
     if (connectionMode.value === 'connecting') {
-      console.warn('[Viewer] WebRTC 握手超时，退化到中继模式')
+      console.warn('[Viewer] WebRTC 鎻℃墜瓒呮椂锛岄€€鍖栧埌涓户妯″紡')
       connectionMode.value = 'relay'
     }
   }, 12000)
 
-  /* 作为 phone 发起 Offer */
+  /* 浣滀负 phone 鍙戣捣 Offer */
   pc.createOffer()
     .then((offer) => pc!.setLocalDescription(offer))
     .then(() => {
@@ -202,12 +223,10 @@ function handleAnswer(desc: any) {
   pc.setRemoteDescription(new RTCSessionDescription(desc)).catch(console.error)
 }
 
-/* ---- 核查点一：Canvas 渲染防爆仓锁 ---- */
+/* ---- 鏍告煡鐐逛竴锛欳anvas 娓叉煋闃茬垎浠撻攣 ---- */
 /*
-  isRendering 布尔锁：当上一帧正在解码/绘制时，新帧无条件丢弃，
-  禁止内存中排队积压 → 防止浏览器爆仓。
-  每帧绘制后立即 close() 释放 ImageBitmap，杜绝长周期内存泄漏。
-*/
+  isRendering 甯冨皵閿侊細褰撲笂涓€甯ф鍦ㄨВ鐮?缁樺埗鏃讹紝鏂板抚鏃犳潯浠朵涪寮冿紝
+  绂佹鍐呭瓨涓帓闃熺Н鍘?鈫?闃叉娴忚鍣ㄧ垎浠撱€?  姣忓抚缁樺埗鍚庣珛鍗?close() 閲婃斁 ImageBitmap锛屾潨缁濋暱鍛ㄦ湡鍐呭瓨娉勬紡銆?*/
 let isRendering = false
 
 async function onVideoFrame(blob: Blob) {
@@ -216,9 +235,9 @@ async function onVideoFrame(blob: Blob) {
   try {
     const bitmap = await createImageBitmap(blob, { colorSpaceConversion: 'none' })
     drawFrame(bitmap)
-    bitmap.close() // 绘制完成后立即释放 GPU 内存
-  } catch { /* 坏帧丢弃 */ }
-  finally { isRendering = false } // 确保锁不会永久卡死
+    bitmap.close() // 缁樺埗瀹屾垚鍚庣珛鍗抽噴鏀?GPU 鍐呭瓨
+  } catch { /* ignore bad frame */ }
+  finally { isRendering = false }
 }
 
 function drawFrame(bitmap: ImageBitmap) {
@@ -241,8 +260,8 @@ function drawFrame(bitmap: ImageBitmap) {
   ctx.drawImage(bitmap, dx, dy, bitmap.width * scale, bitmap.height * scale)
 }
 
-/* ---- 优化三：高频事件节流 + 最小位移阈值 ---- */
-/* 节流间隔 45ms，约 22 次/秒，平衡流畅度与带宽 */
+/* ---- 浼樺寲涓夛細楂橀浜嬩欢鑺傛祦 + 鏈€灏忎綅绉婚槇鍊?---- */
+/* 鑺傛祦闂撮殧 45ms锛岀害 22 娆?绉掞紝骞宠　娴佺晠搴︿笌甯﹀ */
 const THROTTLE_MS = 45
 const MIN_DELTA = 0.005
 
@@ -271,7 +290,7 @@ function throttle<T extends (...args: any[]) => void>(fn: T, ms: number): T {
   }) as T
 }
 
-/* 上一次发送的坐标，用于位移阈值判断 */
+/* 涓婁竴娆″彂閫佺殑鍧愭爣锛岀敤浜庝綅绉婚槇鍊煎垽鏂?*/
 let lastSentX = -1
 let lastSentY = -1
 
@@ -287,7 +306,7 @@ function ratios(e: MouseEvent) {
 
 function sendCommand(type: string, data: unknown) {
   const payload = { type, payload: data }
-  /* 退化顺位感知：中继模式或 DC 未就绪 -> WebSocket 转发 */
+  /* 閫€鍖栭『浣嶆劅鐭ワ細涓户妯″紡鎴?DC 鏈氨缁?-> WebSocket 杞彂 */
   if (connectionMode.value === 'relay' || dc?.readyState !== 'open') {
     sendToSignal(buildEnv('forward', { from: 'phone', payload }))
   } else {
@@ -295,11 +314,11 @@ function sendCommand(type: string, data: unknown) {
   }
 }
 
-/* 经过节流 + 阈值过滤的鼠标移动处理 */
+/* 缁忚繃鑺傛祦 + 闃堝€艰繃婊ょ殑榧犳爣绉诲姩澶勭悊 */
 const onMouseMove = throttle((e: MouseEvent) => {
   const r = ratios(e)
 
-  /* 最小位移阈值：变化小于 0.5% 时丢弃包 */
+  /* 鏈€灏忎綅绉婚槇鍊硷細鍙樺寲灏忎簬 0.5% 鏃朵涪寮冨寘 */
   if (lastSentX >= 0 && lastSentY >= 0) {
     const dx = Math.abs(r.xRatio - lastSentX)
     const dy = Math.abs(r.yRatio - lastSentY)
@@ -326,7 +345,7 @@ function onScroll(e: WheelEvent) {
   sendCommand('SCROLL', { deltaY: e.deltaY })
 }
 
-/* ---- 生命周期 ---- */
+/* ---- 鐢熷懡鍛ㄦ湡 ---- */
 onMounted(() => {
   if (roomCode) connect()
 })
@@ -400,3 +419,4 @@ onUnmounted(() => {
   color: #ccc;
 }
 </style>
+

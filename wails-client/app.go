@@ -64,7 +64,7 @@ type scrollData struct {
 
 // ---------- system DPI helpers ----------
 func getDPIScale() float64 {
-	// 闂団偓鐟?Windows 8.1 娴犮儰绗傞敍灞芥礀闁偓娑?1.0
+	// 闂傚洠鍋撻悷?Windows 8.1 濞寸姰鍎扮粭鍌炴晬鐏炶姤绀€闂侇偀鍋撳☉?1.0
 	dll := windows.NewLazySystemDLL("user32.dll")
 	procDPI := dll.NewProc("GetDpiForWindow")
 	procDesktop := dll.NewProc("GetDesktopWindow")
@@ -183,12 +183,12 @@ func (a *App) startup(ctx context.Context) {
 	setupClientLog()
 	enableDPIAwareness()
 
-	// 閼惧嘲褰囬悧鈺冩倞閸掑棜椴搁悳?	a.screenW, a.screenH = robotgo.GetScreenSize()
-	// 閼惧嘲褰?DPI 缂傗晜鏂?	a.dpiScale = getDPIScale()
-	// 鐠侊紕鐣婚柅鏄忕帆閸掑棜椴搁悳?	a.logicalW = int(float64(a.screenW) / a.dpiScale)
+	// 闁兼儳鍢茶ぐ鍥偋閳哄啯鍊為柛鎺戞妞存悂鎮?	a.screenW, a.screenH = robotgo.GetScreenSize()
+	// 闁兼儳鍢茶ぐ?DPI 缂傚倵鏅滈弬?	a.dpiScale = getDPIScale()
+	// 閻犱緤绱曢悾濠氭焻閺勫繒甯嗛柛鎺戞妞存悂鎮?	a.logicalW = int(float64(a.screenW) / a.dpiScale)
 	a.logicalH = int(float64(a.screenH) / a.dpiScale)
 
-	log.Printf("[App] 閻椻晝鎮?%dx%d  闁槒绶?%dx%d  DPI=%.2f",
+	log.Printf("[App] 闁绘せ鏅濋幃?%dx%d  闂侇偅妲掔欢?%dx%d  DPI=%.2f",
 		a.screenW, a.screenH, a.logicalW, a.logicalH, a.dpiScale)
 }
 
@@ -204,7 +204,7 @@ func setupClientLog() {
 	}
 	log.SetOutput(logFile)
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
-	log.Printf("[App] 閺冦儱绻旈弬鍥︽: %s", logPath)
+	log.Printf("[App] 闁哄啨鍎辩换鏃堝棘閸ワ附顐? %s", logPath)
 }
 
 // ---------- Wails bindings ----------
@@ -287,12 +287,12 @@ func (a *App) Connect(role, signalingURL, sessionID string) error {
 	}
 	a.sigConn = conn
 
-	// ---- 娴兼ê瀵叉稉鈧敍娆糃E 闁板秶鐤嗛敍鍦燗N / IPv6 / TURN 妫板嫮鏆€閿?----
+	// ---- 濞村吋锚鐎靛弶绋夐埀顒勬晬濞嗙硟E 闂佹澘绉堕悿鍡涙晬閸︾嚄N / IPv6 / TURN 濡澘瀚弳鈧柨?----
 	config := webrtc.Configuration{
 		ICEServers: buildICEServers(),
 	}
 
-	// 娴ｈ法鏁?SettingEngine 閺勬儳绱″鈧崥顖氱湰閸╃喓缍夐崪?IPv6 閸婃瑩鈧婀撮崸鈧弨鍫曟肠
+	// 濞达綀娉曢弫?SettingEngine 闁哄嫭鍎崇槐鈥愁嚕閳ь剟宕ラ姘辨拱闁糕晝鍠撶紞澶愬椽?IPv6 闁稿﹥鐟╅埀顒€顦﹢鎾锤閳ь剟寮ㄩ崼鏇熻偁
 	engine := webrtc.SettingEngine{}
 	engine.SetNetworkTypes([]webrtc.NetworkType{
 		webrtc.NetworkTypeUDP4,
@@ -397,13 +397,13 @@ func (a *App) setupDataChannel(dc *webrtc.DataChannel) {
 	})
 
 	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-		// 婵″倹鐏夐弰顖涙瀮閺堫剚绉烽幁顖ょ礉娴ｆ粈璐熼幒褍鍩楅幐鍥︽姢婢跺嫮鎮婇敍娑楃癌鏉╂稑鍩楀☉鍫熶紖娑撳搫鐫嗛獮鏇炴姎閿涘牆鎷烽悾銉礉閺堫剛顏稉宥夋付鐟曚焦瑕嗛弻鎿勭礆
+		// 濠碘€冲€归悘澶愬及椤栨稒鐎柡鍫墯缁夌兘骞侀銈囩濞达絾绮堢拹鐔煎箳瑜嶉崺妤呭箰閸ワ附濮㈠璺哄閹﹪鏁嶅☉妤冪檶閺夆晜绋戦崺妤€鈽夐崼鐔剁礀濞戞挸鎼惈鍡涚嵁閺囩偞濮庨柨娑樼墕閹风兘鎮鹃妷顖滅闁哄牜鍓涢顒佺▔瀹ュ浠橀悷鏇氱劍鐟曞棝寮婚幙鍕
 		if msg.IsString && a.getRole() == RoleComputer {
 			a.handleCommand(string(msg.Data))
 		}
 	})
 
-	// 娴ｆ粈璐熺悮顐ｅ付缁旑垽绱檆omputer閿涘绱濊ぐ?DataChannel 瀵偓閸氼垰鎮楀鈧慨瀣腹闁礁鐫嗛獮鏇炴姎
+	// 濞达絾绮堢拹鐔烘偖椤愶絽浠樼紒鏃戝灲缁辨獑omputer闁挎稑顧€缁辨繆銇?DataChannel 鐎殿喒鍋撻柛姘煎灠閹顕ｉ埀顒佹叏鐎ｎ偄鑵归梺顐＄閻棝鐛弴鐐村
 	dc.OnOpen(func() {
 		a.setPeerConnected(true)
 		if a.getRole() != RoleComputer {
@@ -422,12 +422,12 @@ func (a *App) setupDataChannel(dc *webrtc.DataChannel) {
 					return true
 				}
 				if err := dc.Send(frame); err != nil {
-					log.Printf("[App] 閸欐垿鈧礁鎶氭径杈Е: %v", err)
+					log.Printf("[App] 闁告瑦鍨块埀顑跨閹舵碍寰勬潏顐バ? %v", err)
 					return false
 				}
 				sent++
 				if sent == 1 || sent%50 == 0 {
-					log.Printf("[App] 瀹告彃褰傞柅浣哥潌楠炴洖鎶?%d閿涘苯缍嬮崜宥呮姎 %d bytes", sent, len(frame))
+					log.Printf("[App] 鐎瑰憡褰冭ぐ鍌炴焻娴ｅ摜娼屾鐐存礀閹?%d闁挎稑鑻紞瀣礈瀹ュ懏濮?%d bytes", sent, len(frame))
 				}
 				return true
 			})
@@ -598,7 +598,7 @@ func (a *App) readSignaling() {
 			var sid string
 			json.Unmarshal(env.Payload, &sid)
 			a.sessionID = sid
-			log.Printf("[App] 閺堝秴濮熼崳銊ュ瀻闁板秵鍩ч梻瀵哥垳: %s", sid)
+			log.Printf("[App] 闁哄牆绉存慨鐔煎闯閵娿儱鐎婚梺鏉跨У閸┭囨⒒鐎靛摜鍨? %s", sid)
 
 		case "offer":
 			if a.pc == nil {
@@ -641,8 +641,14 @@ func (a *App) readSignaling() {
 			log.Printf("[App] peer joined session %s", a.sessionID)
 			a.startRelayCapture()
 
-			// 閳光偓閳光偓 娴兼ê瀵查敍姝恊bSocket 閸ョ偤鈧偓闁岸浜鹃惃鍕付閸掕埖瀵氭禒?閳光偓閳光偓
-			// 瑜版挻绁荤憴鍫濇珤缁?WebRTC DataChannel 閺堫亣鍏橀幍鎾烩偓姘閿?		// 閹貉冨煑閹稿洣鎶ら柅姘崇箖娣団€叉姢 WebSocket 鏉烆剙褰傞崚鎷屾彧濮濄倕顦╅妴?		// 婢跺秶鏁?handleCommand 绾喕绻氭稉?DataChannel 鐠ф澘鎮撴稉鈧總?DPI 閹广垻鐣婚柅鏄忕帆閵?		case "MOUSE_MOVE", "MOUSE_CLICK", "KEY_PRESS", "SCROLL":
+		case "peer_left":
+			var leftRole string
+			_ = json.Unmarshal(env.Payload, &leftRole)
+			log.Printf("[App] peer left session %s: %s", a.sessionID, leftRole)
+			a.setPeerConnected(false)
+
+			// 闁冲厜鍋撻柍鍏夊亾 濞村吋锚鐎垫煡鏁嶅鎭奲Socket 闁搞儳鍋ら埀顑藉亾闂侇偅宀告禍楣冩儍閸曨剙浠橀柛鎺曞煐鐎垫碍绂?闁冲厜鍋撻柍鍏夊亾
+			// 鐟滅増鎸荤粊鑽ゆ喆閸繃鐝ょ紒?WebRTC DataChannel 闁哄牜浜ｉ崗姗€骞嶉幘鐑╁亾濮橆厽顦ч柨?		// 闁硅矇鍐ㄧ厬闁圭娲ｉ幎銈夋焻濮樺磭绠栧ǎ鍥ｂ偓鍙夊Б WebSocket 閺夌儐鍓欒ぐ鍌炲礆閹峰本褰ф慨婵勫€曢ˇ鈺呭Υ?		// 濠㈣泛绉堕弫?handleCommand 缁绢収鍠曠换姘▔?DataChannel 閻犙勬緲閹挻绋夐埀顒佺附?DPI 闁瑰箍鍨婚悾濠氭焻閺勫繒甯嗛柕?		case "MOUSE_MOVE", "MOUSE_CLICK", "KEY_PRESS", "SCROLL":
 			if a.getRole() == RoleComputer {
 				a.handleCommand(string(raw))
 			}

@@ -1,4 +1,4 @@
-<template>
+﻿<template>
   <div class="dashboard">
     <header class="header">
       <h1>远程控制</h1>
@@ -24,9 +24,10 @@
     <section class="card">
       <h2>控制端设备</h2>
       <ul class="device-list" v-if="devices.length">
-        <li v-for="d in devices" :key="d.id">{{ d.name }} — {{ d.status }}</li>
+        <li v-for="d in devices" :key="d.id">{{ d.name }} - {{ d.status }}</li>
       </ul>
       <p v-else class="empty">等待设备接入中...</p>
+      <p v-if="disconnectNotice" class="notice">{{ disconnectNotice }}</p>
     </section>
 
     <button class="btn-primary" @click="startSession" :disabled="connecting">
@@ -47,9 +48,11 @@ const sessionId = ref('')
 const connected = ref(false)
 const connecting = ref(false)
 const devices = ref<{ id: string; name: string; status: string }[]>([])
+const disconnectNotice = ref('')
 let peerPoll: ReturnType<typeof setInterval> | null = null
+let hadPeer = false
 
-/* 服务端地址默认为本机，用户可根据实际局域网 IP 修改 */
+/* 鏈嶅姟绔湴鍧€榛樿涓烘湰鏈猴紝鐢ㄦ埛鍙牴鎹疄闄呭眬鍩熺綉 IP 淇敼 */
 const serverAddr = ref(getDefaultSignalServer() || DEFAULT_SIGNAL_SERVER)
 
 function copyCode() {
@@ -80,6 +83,13 @@ async function startSession() {
 async function refreshPeerStatus() {
   if (!app?.GetPeerConnected) return
   const ready = await app.GetPeerConnected()
+  if (ready) {
+    hadPeer = true
+    disconnectNotice.value = ''
+  } else if (hadPeer) {
+    disconnectNotice.value = '控制端已断开，等待新的设备接入'
+    hadPeer = false
+  }
   devices.value = ready
     ? [{ id: 'phone', name: '手机浏览器', status: '已接入' }]
     : []
@@ -193,6 +203,11 @@ onUnmounted(() => {
 .empty {
   color: #999;
   font-size: 0.9rem;
+}
+.notice {
+  color: #b45309;
+  font-size: 0.9rem;
+  margin: 0.5rem 0 0;
 }
 .btn-primary {
   width: 100%;

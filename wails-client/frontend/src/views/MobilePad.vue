@@ -56,6 +56,7 @@ const inputServer = ref(getDefaultSignalServer() || DEFAULT_SIGNAL_SERVER)
 const errorMsg = ref('')
 const connected = ref(false)
 const sessionId = ref('')
+const disconnectReason = ref('')
 
 /* ---- DOM 引用 ---- */
 const previewCanvas = ref<HTMLCanvasElement | null>(null)
@@ -94,6 +95,7 @@ function doConnect() {
 
 function connect(code: string, addr: string) {
   sessionId.value = code
+  disconnectReason.value = ''
   const url = `${addr}/connect/phone?sid=${encodeURIComponent(code)}`
   ws = new WebSocket(url)
   ws.binaryType = 'blob'
@@ -119,7 +121,7 @@ function connect(code: string, addr: string) {
   }
 
   ws.onclose = () => {
-    connected.value = false
+    handleDisconnected(disconnectReason.value || '信令连接已断开')
   }
 
   ws.onerror = () => {
@@ -144,6 +146,33 @@ function onSignalMessage(msg: { type: string; payload?: any }) {
         pc.addIceCandidate(candidate).catch(() => {})
       }
       return
+    case 'peer_left':
+      handleDisconnected('电脑受控端已断开')
+      return
+  }
+}
+
+function handleDisconnected(reason: string) {
+  disconnectReason.value = reason
+  errorMsg.value = reason
+  connected.value = false
+  connectionMode.value = 'connecting'
+  if (relayTimeout) { clearTimeout(relayTimeout); relayTimeout = null }
+  joystick?.destroy()
+  joystick = null
+  dc?.close()
+  dc = null
+  pc?.close()
+  pc = null
+}
+
+function onIncomingFrame(data: unknown) {
+  if (data instanceof Blob) {
+    onVideoFrame(data)
+    return
+  }
+  if (data instanceof ArrayBuffer) {
+    onVideoFrame(new Blob([data], { type: 'image/jpeg' }))
   }
 }
 
@@ -184,9 +213,7 @@ function startWebRTC() {
     connectionMode.value = 'relay'
   }
   dc.onmessage = (evt: MessageEvent) => {
-    if (evt.data instanceof Blob) {
-      onVideoFrame(evt.data)
-    }
+    onIncomingFrame(evt.data)
   }
 
   /* 5 秒握手超时 -> 中继 */
