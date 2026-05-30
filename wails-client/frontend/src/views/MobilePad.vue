@@ -43,6 +43,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import nipplejs from 'nipplejs'
+import { buildIceServers } from '../utils/ice'
 import { DEFAULT_SIGNAL_SERVER, getDefaultSignalServer } from '../utils/signal'
 
 /* ---- 退化模式 ---- */
@@ -149,7 +150,8 @@ function onSignalMessage(msg: { type: string; payload?: any }) {
 /* ---- WebRTC (phone 端，黄金退化顺位 1-3) ---- */
 function startWebRTC() {
   const cfg: RTCConfiguration = {
-    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+    iceServers: buildIceServers(),
+    iceTransportPolicy: 'all',
   }
   pc = new RTCPeerConnection(cfg)
 
@@ -193,7 +195,7 @@ function startWebRTC() {
       console.warn('[Mobile] WebRTC 握手超时，退化到中继')
       connectionMode.value = 'relay'
     }
-  }, 5000)
+  }, 12000)
 
   pc.createOffer()
     .then((offer) => pc!.setLocalDescription(offer))

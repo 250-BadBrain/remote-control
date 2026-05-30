@@ -8,6 +8,7 @@
 *.out
 go.sum
 vendor/
+.gocache/
 
 # Wails
 wails-client/build/
@@ -34,4 +35,5 @@ Thumbs.db
 .env.development
 .env.production
 
-up.bat
+# Deploy
+*.bat

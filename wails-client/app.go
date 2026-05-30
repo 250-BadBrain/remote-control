@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/go-vgo/robotgo"
@@ -32,6 +33,16 @@ const (
 	RolePhone    = "phone"
 )
 
+var defaultSTUNURLs = []string{
+	"stun:stun.l.google.com:19302",
+	"stun:turn.h2seo4.win:3478",
+}
+
+var defaultTURNURLs = []string{
+	"turn:turn.h2seo4.win:3478?transport=udp",
+	"turn:turn.h2seo4.win:3478?transport=tcp",
+}
+
 type mouseMoveData struct {
 	XRatio float64 `json:"xRatio"`
 	YRatio float64 `json:"yRatio"`
@@ -51,10 +62,9 @@ type scrollData struct {
 	DeltaY float64 `json:"deltaY"`
 }
 
-// ---------- 系统 DPI / 分辨率 工具 ----------
-// getDPIScale 通过 Windows API 获取主显示器 DPI 缩放比（如 1.0, 1.25, 1.5, 2.0）
+// ---------- system DPI helpers ----------
 func getDPIScale() float64 {
-	// 需要 Windows 8.1 以上，回退为 1.0
+	// 闂団偓鐟?Windows 8.1 娴犮儰绗傞敍灞芥礀闁偓娑?1.0
 	dll := windows.NewLazySystemDLL("user32.dll")
 	procDPI := dll.NewProc("GetDpiForWindow")
 	procDesktop := dll.NewProc("GetDesktopWindow")
@@ -88,6 +98,48 @@ func setCursorPos(x, y int) {
 	proc.Call(uintptr(x), uintptr(y))
 }
 
+func buildICEServers() []webrtc.ICEServer {
+	servers := []webrtc.ICEServer{
+		{URLs: defaultSTUNURLs},
+	}
+
+	username := strings.TrimSpace(os.Getenv("TURN_USERNAME"))
+	if username == "" {
+		username = "remoteuser"
+	}
+	credential := strings.TrimSpace(os.Getenv("TURN_PASSWORD"))
+	if credential == "" {
+		return servers
+	}
+
+	urls := splitEnvList(os.Getenv("TURN_URLS"))
+	if len(urls) == 0 {
+		urls = defaultTURNURLs
+	}
+
+	servers = append(servers, webrtc.ICEServer{
+		URLs:           urls,
+		Username:       username,
+		Credential:     credential,
+		CredentialType: webrtc.ICECredentialTypePassword,
+	})
+	return servers
+}
+
+func splitEnvList(value string) []string {
+	parts := strings.FieldsFunc(value, func(r rune) bool {
+		return r == ',' || r == ';' || r == '\n'
+	})
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
 // ---------- App ----------
 type App struct {
 	ctx                 context.Context
@@ -100,29 +152,26 @@ type App struct {
 	peerReady           bool
 	relayCaptureRunning bool
 
-	// 屏幕参数（优化二：DPI 自适应）
-	screenW     int     // 物理像素宽
-	screenH     int     // 物理像素高
-	logicalW    int     // 逻辑像素宽（DPI 缩放后）
-	logicalH    int     // 逻辑像素高
-	dpiScale    float64 // DPI 缩放系数 (1.0 / 1.25 / 1.5 / 2.0 …)
-	captureW    int     // 屏幕捕获实际宽度（与截图一致）
-	captureH    int     // 屏幕捕获实际高度
-	insecureTLS bool    // wss 连接时是否跳过 TLS 证书校验（自签名证书）
+	screenW     int
+	screenH     int
+	logicalW    int
+	logicalH    int
+	dpiScale    float64
+	captureW    int
+	captureH    int
+	insecureTLS bool
 }
 
 func NewApp() *App {
 	return &App{insecureTLS: true}
 }
 
-// SetInsecureTLS 当信令服务器使用自签名 TLS 证书时调用（仅限 wss://）
 func (a *App) SetInsecureTLS(insecure bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.insecureTLS = insecure
 }
 
-// GetInsecureTLS 返回当前 TLS 证书校验跳过状态
 func (a *App) GetInsecureTLS() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -134,15 +183,12 @@ func (a *App) startup(ctx context.Context) {
 	setupClientLog()
 	enableDPIAwareness()
 
-	// 获取物理分辨率
-	a.screenW, a.screenH = robotgo.GetScreenSize()
-	// 获取 DPI 缩放
-	a.dpiScale = getDPIScale()
-	// 计算逻辑分辨率
-	a.logicalW = int(float64(a.screenW) / a.dpiScale)
+	// 閼惧嘲褰囬悧鈺冩倞閸掑棜椴搁悳?	a.screenW, a.screenH = robotgo.GetScreenSize()
+	// 閼惧嘲褰?DPI 缂傗晜鏂?	a.dpiScale = getDPIScale()
+	// 鐠侊紕鐣婚柅鏄忕帆閸掑棜椴搁悳?	a.logicalW = int(float64(a.screenW) / a.dpiScale)
 	a.logicalH = int(float64(a.screenH) / a.dpiScale)
 
-	log.Printf("[App] 物理=%dx%d  逻辑=%dx%d  DPI=%.2f",
+	log.Printf("[App] 閻椻晝鎮?%dx%d  闁槒绶?%dx%d  DPI=%.2f",
 		a.screenW, a.screenH, a.logicalW, a.logicalH, a.dpiScale)
 }
 
@@ -158,7 +204,7 @@ func setupClientLog() {
 	}
 	log.SetOutput(logFile)
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
-	log.Printf("[App] 日志文件: %s", logPath)
+	log.Printf("[App] 閺冦儱绻旈弬鍥︽: %s", logPath)
 }
 
 // ---------- Wails bindings ----------
@@ -241,23 +287,12 @@ func (a *App) Connect(role, signalingURL, sessionID string) error {
 	}
 	a.sigConn = conn
 
-	// ---- 优化一：ICE 配置（LAN / IPv6 / TURN 预留） ----
+	// ---- 娴兼ê瀵叉稉鈧敍娆糃E 闁板秶鐤嗛敍鍦燗N / IPv6 / TURN 妫板嫮鏆€閿?----
 	config := webrtc.Configuration{
-		ICEServers: []webrtc.ICEServer{
-			{URLs: []string{"stun:stun.l.google.com:19302"}},
-			// ── TURN 预留接口 ──
-			// 在 Oracle Cloud 部署 coturn 后取消注释即可一键接入
-			// {
-			// 	URLs:           []string{"turn:你的甲骨文服务器IP:3478"},
-			// 	Username:       "coturn用户名",
-			// 	Credential:     "coturn密码",
-			// 	CredentialType: webrtc.CredentialTypePassword,
-			// },
-		},
+		ICEServers: buildICEServers(),
 	}
 
-	// 使用 SettingEngine 显式开启局域网和 IPv6 候选地址收集
-	// 校园网环境下 IPv4 打洞困难，IPv6 直连 + LAN 候选可大幅提高成功率
+	// 娴ｈ法鏁?SettingEngine 閺勬儳绱″鈧崥顖氱湰閸╃喓缍夐崪?IPv6 閸婃瑩鈧婀撮崸鈧弨鍫曟肠
 	engine := webrtc.SettingEngine{}
 	engine.SetNetworkTypes([]webrtc.NetworkType{
 		webrtc.NetworkTypeUDP4,
@@ -362,20 +397,20 @@ func (a *App) setupDataChannel(dc *webrtc.DataChannel) {
 	})
 
 	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-		// 如果是文本消息，作为控制指令处理；二进制消息为屏幕帧（忽略，本端不需要渲染）
+		// 婵″倹鐏夐弰顖涙瀮閺堫剚绉烽幁顖ょ礉娴ｆ粈璐熼幒褍鍩楅幐鍥︽姢婢跺嫮鎮婇敍娑楃癌鏉╂稑鍩楀☉鍫熶紖娑撳搫鐫嗛獮鏇炴姎閿涘牆鎷烽悾銉礉閺堫剛顏稉宥夋付鐟曚焦瑕嗛弻鎿勭礆
 		if msg.IsString && a.getRole() == RoleComputer {
 			a.handleCommand(string(msg.Data))
 		}
 	})
 
-	// 作为被控端（computer），当 DataChannel 开启后开始推送屏幕帧
+	// 娴ｆ粈璐熺悮顐ｅ付缁旑垽绱檆omputer閿涘绱濊ぐ?DataChannel 瀵偓閸氼垰鎮楀鈧慨瀣腹闁礁鐫嗛獮鏇炴姎
 	dc.OnOpen(func() {
 		a.setPeerConnected(true)
 		if a.getRole() != RoleComputer {
-			log.Printf("[App] DataChannel 已开启，当前角色无需推送屏幕")
+			log.Printf("[App] DataChannel opened, no screen push needed for this role")
 			return
 		}
-		log.Printf("[App] DataChannel 已开启，开始屏幕捕获推送")
+		log.Printf("[App] DataChannel opened, start screen capture")
 		a.dc = dc
 		go func() {
 			sent := 0
@@ -387,12 +422,12 @@ func (a *App) setupDataChannel(dc *webrtc.DataChannel) {
 					return true
 				}
 				if err := dc.Send(frame); err != nil {
-					log.Printf("[App] 发送帧失败: %v", err)
+					log.Printf("[App] 閸欐垿鈧礁鎶氭径杈Е: %v", err)
 					return false
 				}
 				sent++
 				if sent == 1 || sent%50 == 0 {
-					log.Printf("[App] 已发送屏幕帧 %d，当前帧 %d bytes", sent, len(frame))
+					log.Printf("[App] 瀹告彃褰傞柅浣哥潌楠炴洖鎶?%d閿涘苯缍嬮崜宥呮姎 %d bytes", sent, len(frame))
 				}
 				return true
 			})
@@ -522,7 +557,6 @@ func (a *App) execKeyPress(d keyPressData) {
 }
 
 func (a *App) execScroll(d scrollData) {
-	// deltaY > 0 向下滚, < 0 向上滚
 	clicks := int(d.DeltaY / 100)
 	if clicks == 0 {
 		if d.DeltaY > 0 {
@@ -564,7 +598,7 @@ func (a *App) readSignaling() {
 			var sid string
 			json.Unmarshal(env.Payload, &sid)
 			a.sessionID = sid
-			log.Printf("[App] 服务器分配房间码: %s", sid)
+			log.Printf("[App] 閺堝秴濮熼崳銊ュ瀻闁板秵鍩ч梻瀵哥垳: %s", sid)
 
 		case "offer":
 			if a.pc == nil {
@@ -607,11 +641,8 @@ func (a *App) readSignaling() {
 			log.Printf("[App] peer joined session %s", a.sessionID)
 			a.startRelayCapture()
 
-		// ── 优化：WebSocket 回退通道的控制指令 ──
-		// 当浏览器端 WebRTC DataChannel 未能打通时，
-		// 控制指令通过信令 WebSocket 转发到达此处。
-		// 复用 handleCommand 确保与 DataChannel 走同一套 DPI 换算逻辑。
-		case "MOUSE_MOVE", "MOUSE_CLICK", "KEY_PRESS", "SCROLL":
+			// 閳光偓閳光偓 娴兼ê瀵查敍姝恊bSocket 閸ョ偤鈧偓闁岸浜鹃惃鍕付閸掕埖瀵氭禒?閳光偓閳光偓
+			// 瑜版挻绁荤憴鍫濇珤缁?WebRTC DataChannel 閺堫亣鍏橀幍鎾烩偓姘閿?		// 閹貉冨煑閹稿洣鎶ら柅姘崇箖娣団€叉姢 WebSocket 鏉烆剙褰傞崚鎷屾彧濮濄倕顦╅妴?		// 婢跺秶鏁?handleCommand 绾喕绻氭稉?DataChannel 鐠ф澘鎮撴稉鈧總?DPI 閹广垻鐣婚柅鏄忕帆閵?		case "MOUSE_MOVE", "MOUSE_CLICK", "KEY_PRESS", "SCROLL":
 			if a.getRole() == RoleComputer {
 				a.handleCommand(string(raw))
 			}

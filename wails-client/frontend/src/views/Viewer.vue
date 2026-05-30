@@ -24,6 +24,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
+import { buildIceServers } from '../utils/ice'
 import { DEFAULT_SIGNAL_SERVER, getDefaultSignalServer } from '../utils/signal'
 
 /* ---- 连接退化模式 ---- */
@@ -127,7 +128,8 @@ function onSignalMessage(msg: { type: string; payload?: any }) {
 /* ---- WebRTC（黄金退化顺位 1-3） ---- */
 function startWebRTC() {
   const cfg: RTCConfiguration = {
-    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+    iceServers: buildIceServers(),
+    iceTransportPolicy: 'all',
   }
   pc = new RTCPeerConnection(cfg)
 
@@ -173,7 +175,7 @@ function startWebRTC() {
       console.warn('[Viewer] WebRTC 握手超时，退化到中继模式')
       connectionMode.value = 'relay'
     }
-  }, 5000)
+  }, 12000)
 
   /* 作为 phone 发起 Offer */
   pc.createOffer()
