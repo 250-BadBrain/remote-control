@@ -2,38 +2,24 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
-	"encoding/binary"
 	"encoding/json"
 	"log"
-	"net/url"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/go-vgo/robotgo"
-	"github.com/gorilla/websocket"
 	"github.com/kbinani/screenshot"
-	"github.com/pion/webrtc/v3"
-	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 	"golang.org/x/sys/windows"
 )
 
-// ---------- protocol types ----------
 type envelope struct {
 	Type    string          `json:"type"`
 	Payload json.RawMessage `json:"payload"`
 	From    string          `json:"from,omitempty"`
 	To      string          `json:"to,omitempty"`
 }
-
-const (
-	RoleComputer = "computer"
-	RolePhone    = "phone"
-)
 
 var defaultSTUNURLs = []string{
 	"stun:stun.l.google.com:19302",
@@ -44,12 +30,6 @@ var defaultTURNURLs = []string{
 	"turn:turn.h2seo4.win:3478?transport=udp",
 	"turn:turn.h2seo4.win:3478?transport=tcp",
 }
-
-const (
-	frameChunkMagic   uint32 = 0x52434631 // "RCF1"
-	frameChunkHeader         = 12
-	frameChunkPayload        = 60 * 1024
-)
 
 type mouseMoveData struct {
 	XRatio float64 `json:"xRatio"`
@@ -70,148 +50,35 @@ type scrollData struct {
 	DeltaY float64 `json:"deltaY"`
 }
 
-// ---------- system DPI helpers ----------
-func getDPIScale() float64 {
-	// 闂傚倸娲犻崑鎾绘偡?Windows 8.1 婵炲濮伴崕鎵箔閸岀偞鏅悘鐐跺Г缁€鈧梻渚囧亐閸嬫挸鈽?1.0
-	dll := windows.NewLazySystemDLL("user32.dll")
-	procDPI := dll.NewProc("GetDpiForWindow")
-	procDesktop := dll.NewProc("GetDesktopWindow")
-
-	hwnd, _, _ := procDesktop.Call()
-	if hwnd == 0 {
-		return 1.0
-	}
-	dpi, _, _ := procDPI.Call(hwnd)
-	if dpi == 0 {
-		return 1.0
-	}
-	return float64(dpi) / 96.0
+type frontendICEServer struct {
+	URLs       []string `json:"urls"`
+	Username   string   `json:"username,omitempty"`
+	Credential string   `json:"credential,omitempty"`
 }
 
-func enableDPIAwareness() {
-	user32 := windows.NewLazySystemDLL("user32.dll")
-	if proc := user32.NewProc("SetProcessDpiAwarenessContext"); proc.Find() == nil {
-		// DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
-		proc.Call(^uintptr(3))
-		return
-	}
-	if proc := user32.NewProc("SetProcessDPIAware"); proc.Find() == nil {
-		proc.Call()
-	}
-}
-
-func setCursorPos(x, y int) {
-	user32 := windows.NewLazySystemDLL("user32.dll")
-	proc := user32.NewProc("SetCursorPos")
-	proc.Call(uintptr(x), uintptr(y))
-}
-
-func buildICEServers() []webrtc.ICEServer {
-	servers := []webrtc.ICEServer{
-		{URLs: defaultSTUNURLs},
-	}
-
-	username := strings.TrimSpace(os.Getenv("TURN_USERNAME"))
-	if username == "" {
-		username = "remoteuser"
-	}
-	credential := strings.TrimSpace(os.Getenv("TURN_PASSWORD"))
-	if credential == "" {
-		log.Printf("[ICE] TURN disabled: TURN_PASSWORD is not set")
-		return servers
-	}
-
-	urls := splitEnvList(os.Getenv("TURN_URLS"))
-	if len(urls) == 0 {
-		urls = defaultTURNURLs
-	}
-
-	servers = append(servers, webrtc.ICEServer{
-		URLs:           urls,
-		Username:       username,
-		Credential:     credential,
-		CredentialType: webrtc.ICECredentialTypePassword,
-	})
-	log.Printf("[ICE] TURN enabled: urls=%v username=%s", urls, username)
-	return servers
-}
-
-func splitEnvList(value string) []string {
-	parts := strings.FieldsFunc(value, func(r rune) bool {
-		return r == ',' || r == ';' || r == '\n'
-	})
-	out := make([]string, 0, len(parts))
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part != "" {
-			out = append(out, part)
-		}
-	}
-	return out
-}
-
-// ---------- App ----------
 type App struct {
-	ctx                 context.Context
-	sessionID           string
-	role                string
-	sigConn             *websocket.Conn
-	pc                  *webrtc.PeerConnection
-	dc                  *webrtc.DataChannel
-	mu                  sync.Mutex
-	signalWriteMu       sync.Mutex
-	peerReady           bool
-	relayCaptureRunning bool
-	relayFallbackTimer  *time.Timer
-
-	screenW     int
-	screenH     int
-	logicalW    int
-	logicalH    int
-	dpiScale    float64
-	captureW    int
-	captureH    int
+	ctx         context.Context
+	mu          sync.Mutex
+	sessionID   string
+	peerReady   bool
 	insecureTLS bool
+
+	screenW  int
+	screenH  int
+	logicalW int
+	logicalH int
+	dpiScale float64
 }
 
 func NewApp() *App {
 	return &App{insecureTLS: true}
 }
 
-func (a *App) SetInsecureTLS(insecure bool) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.insecureTLS = insecure
-}
-
-func (a *App) GetInsecureTLS() bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.insecureTLS
-}
-
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	setupClientLog()
 	enableDPIAwareness()
-	a.screenW, a.screenH = robotgo.GetScreenSize()
-	if a.screenW <= 0 || a.screenH <= 0 {
-		bounds := screenshot.GetDisplayBounds(0)
-		a.screenW = bounds.Dx()
-		a.screenH = bounds.Dy()
-		log.Printf("[App] robotgo screen size unavailable, fallback to screenshot bounds")
-	}
-	a.dpiScale = getDPIScale()
-	if a.dpiScale <= 0 {
-		a.dpiScale = 1.0
-	}
-	a.logicalW = int(float64(a.screenW) / a.dpiScale)
-
-	// 闂佸吋鍎抽崲鑼躲亹閸ヮ剚鍋嬮柍鍝勫暞閸婄偤鏌涢幒鎴烆棥濡炲瓨鎮傞幃?	a.screenW, a.screenH = robotgo.GetScreenSize()
-	// 闂佸吋鍎抽崲鑼躲亹?DPI 缂傚倸鍊甸弲婊堝棘?	a.dpiScale = getDPIScale()
-	// 闁荤姳绶ょ槐鏇㈡偩婵犳碍鐒婚柡鍕箳鐢棝鏌涢幒鎴烆棥濡炲瓨鎮傞幃?	a.logicalW = int(float64(a.screenW) / a.dpiScale)
-	a.logicalH = int(float64(a.screenH) / a.dpiScale)
-
+	a.refreshScreenInfo()
 	log.Printf("[App] screen physical=%dx%d logical=%dx%d dpiScale=%.2f",
 		a.screenW, a.screenH, a.logicalW, a.logicalH, a.dpiScale)
 }
@@ -236,419 +103,167 @@ func setupClientLog() {
 	log.Printf("[App] log file: %s", logPath)
 }
 
-// ---------- Wails bindings ----------
+func (a *App) refreshScreenInfo() {
+	a.screenW, a.screenH = robotgo.GetScreenSize()
+	if a.screenW <= 0 || a.screenH <= 0 {
+		bounds := screenshot.GetDisplayBounds(0)
+		a.screenW = bounds.Dx()
+		a.screenH = bounds.Dy()
+		log.Printf("[App] robotgo screen size unavailable, fallback to screenshot bounds")
+	}
+	a.dpiScale = getDPIScale()
+	if a.dpiScale <= 0 {
+		a.dpiScale = 1.0
+	}
+	a.logicalW = int(float64(a.screenW) / a.dpiScale)
+	a.logicalH = int(float64(a.screenH) / a.dpiScale)
+}
+
+func getDPIScale() float64 {
+	dll := windows.NewLazySystemDLL("user32.dll")
+	procDPI := dll.NewProc("GetDpiForWindow")
+	procDesktop := dll.NewProc("GetDesktopWindow")
+
+	hwnd, _, _ := procDesktop.Call()
+	if hwnd == 0 {
+		return 1.0
+	}
+	dpi, _, _ := procDPI.Call(hwnd)
+	if dpi == 0 {
+		return 1.0
+	}
+	return float64(dpi) / 96.0
+}
+
+func enableDPIAwareness() {
+	user32 := windows.NewLazySystemDLL("user32.dll")
+	if proc := user32.NewProc("SetProcessDpiAwarenessContext"); proc.Find() == nil {
+		proc.Call(^uintptr(3))
+		return
+	}
+	if proc := user32.NewProc("SetProcessDPIAware"); proc.Find() == nil {
+		proc.Call()
+	}
+}
+
+func setCursorPos(x, y int) {
+	user32 := windows.NewLazySystemDLL("user32.dll")
+	proc := user32.NewProc("SetCursorPos")
+	proc.Call(uintptr(x), uintptr(y))
+}
+
+func splitEnvList(value string) []string {
+	parts := strings.FieldsFunc(value, func(r rune) bool {
+		return r == ',' || r == ';' || r == '\n'
+	})
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+func buildFrontendICEServers() []frontendICEServer {
+	servers := []frontendICEServer{
+		{URLs: defaultSTUNURLs},
+	}
+
+	username := strings.TrimSpace(os.Getenv("TURN_USERNAME"))
+	if username == "" {
+		username = "remoteuser"
+	}
+	credential := strings.TrimSpace(os.Getenv("TURN_PASSWORD"))
+	if credential == "" {
+		log.Printf("[ICE] frontend TURN disabled: TURN_PASSWORD is not set")
+		return servers
+	}
+
+	urls := splitEnvList(os.Getenv("TURN_URLS"))
+	if len(urls) == 0 {
+		urls = defaultTURNURLs
+	}
+
+	servers = append(servers, frontendICEServer{
+		URLs:       urls,
+		Username:   username,
+		Credential: credential,
+	})
+	log.Printf("[ICE] frontend TURN enabled: urls=%v username=%s", urls, username)
+	return servers
+}
 
 func (a *App) GetSessionID() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	return a.sessionID
 }
 
-func (a *App) getRole() string {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.role
-}
-
 func (a *App) GetPeerConnected() bool {
-	return a.getPeerConnected()
-}
-
-func (a *App) Disconnect() error {
-	a.mu.Lock()
-	conn := a.sigConn
-	pc := a.pc
-	dc := a.dc
-	timer := a.relayFallbackTimer
-	a.sigConn = nil
-	a.pc = nil
-	a.dc = nil
-	a.peerReady = false
-	a.relayCaptureRunning = false
-	a.relayFallbackTimer = nil
-	a.mu.Unlock()
-
-	if timer != nil {
-		timer.Stop()
-	}
-	if dc != nil {
-		_ = dc.Close()
-	}
-	if pc != nil {
-		_ = pc.Close()
-	}
-	if conn != nil {
-		deadline := time.Now().Add(time.Second)
-		_ = conn.WriteControl(
-			websocket.CloseMessage,
-			websocket.FormatCloseMessage(websocket.CloseNormalClosure, "client closing"),
-			deadline,
-		)
-		_ = conn.Close()
-	}
-	if a.ctx != nil {
-		wailsruntime.EventsEmit(a.ctx, "peer_status", false)
-	}
-	log.Printf("[App] disconnected")
-	return nil
-}
-
-func (a *App) getPeerConnected() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.peerReady
 }
 
-func (a *App) setPeerConnected(ready bool) {
-	a.mu.Lock()
-	a.peerReady = ready
-	a.mu.Unlock()
-	if a.ctx != nil {
-		wailsruntime.EventsEmit(a.ctx, "peer_status", ready)
-	}
+func (a *App) GetFrontendICEServers() []frontendICEServer {
+	return buildFrontendICEServers()
 }
 
-func (a *App) writeSignalMessage(msgType int, msg []byte) error {
+func (a *App) SetInsecureTLS(insecure bool) {
 	a.mu.Lock()
-	conn := a.sigConn
-	a.mu.Unlock()
-	if conn == nil {
-		return nil
-	}
-
-	a.signalWriteMu.Lock()
-	defer a.signalWriteMu.Unlock()
-	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-	return conn.WriteMessage(msgType, msg)
+	defer a.mu.Unlock()
+	a.insecureTLS = insecure
 }
 
-func (a *App) writeSignal(msg []byte) error {
-	return a.writeSignalMessage(websocket.TextMessage, msg)
+func (a *App) GetInsecureTLS() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.insecureTLS
 }
 
-func (a *App) dataChannelOpen() bool {
+func (a *App) Disconnect() error {
 	a.mu.Lock()
-	dc := a.dc
-	a.mu.Unlock()
-	return dc != nil && dc.ReadyState() == webrtc.DataChannelStateOpen
-}
-
-// Connect dials the signaling server and establishes WebRTC.
-func (a *App) Connect(role, signalingURL, sessionID string) error {
-	a.sessionID = sessionID
-	a.mu.Lock()
-	a.role = role
 	a.peerReady = false
-	a.relayCaptureRunning = false
 	a.mu.Unlock()
-
-	u, _ := url.Parse(signalingURL)
-	u.Path = path.Join("/connect", role)
-	q := u.Query()
-	if sessionID != "" {
-		q.Set("sid", sessionID)
-	}
-	u.RawQuery = q.Encode()
-
-	dialer := *websocket.DefaultDialer
-	if u.Scheme == "wss" {
-		dialer.TLSClientConfig = &tls.Config{
-			InsecureSkipVerify: a.insecureTLS,
-		}
-	}
-	conn, _, err := dialer.Dial(u.String(), nil)
-	if err != nil {
-		return err
-	}
-	a.sigConn = conn
-
-	// ---- 婵炴潙鍚嬮敋閻庨潧寮剁粙澶愬焵椤掑嫭鏅繛鍡欑E 闂備焦婢樼粔鍫曟偪閸℃稒鏅柛锔惧殑N / IPv6 / TURN 婵☆偅婢樼€氼噣寮抽埀顒勬煥?----
-	config := webrtc.Configuration{
-		ICEServers: buildICEServers(),
-	}
-
-	// 婵炶揪缍€濞夋洟寮?SettingEngine 闂佸搫瀚崕宕囨閳ユ剚鍤曢柍褜鍓熷畷銉╊敍濮樿鲸鎷遍梺绯曟櫇閸犳挾绱炴径鎰そ?IPv6 闂佺锕ラ悷鈺呭焵椤掆偓椤︻垰锕㈤幘顔奸敜闁逞屽墴瀵劑宕奸弴鐔诲亖
-	engine := webrtc.SettingEngine{}
-	engine.SetNetworkTypes([]webrtc.NetworkType{
-		webrtc.NetworkTypeUDP4,
-		webrtc.NetworkTypeUDP6,
-		webrtc.NetworkTypeTCP4,
-		webrtc.NetworkTypeTCP6,
-	})
-
-	api := webrtc.NewAPI(webrtc.WithSettingEngine(engine))
-	pc, err := api.NewPeerConnection(config)
-	if err != nil {
-		return err
-	}
-	a.pc = pc
-
-	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
-		log.Printf("[App] PeerConnection state: %s", state.String())
-		if state == webrtc.PeerConnectionStateConnected {
-			a.cancelRelayFallback()
-		}
-		if state == webrtc.PeerConnectionStateFailed ||
-			state == webrtc.PeerConnectionStateDisconnected ||
-			state == webrtc.PeerConnectionStateClosed {
-			if a.getRole() == RoleComputer && state != webrtc.PeerConnectionStateClosed {
-				a.startRelayCapture()
-			} else {
-				a.setPeerConnected(false)
-			}
-		}
-	})
-
-	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
-		log.Printf("[App] ICE state: %s", state.String())
-	})
-
-	if role == RolePhone {
-		dc, err := pc.CreateDataChannel("control", nil)
-		if err != nil {
-			return err
-		}
-		a.dc = dc
-		a.setupDataChannel(dc)
-	}
-
-	pc.OnDataChannel(func(dc *webrtc.DataChannel) {
-		log.Printf("[App] remote DataChannel: %s", dc.Label())
-		a.dc = dc
-		a.setupDataChannel(dc)
-	})
-
-	pc.OnICECandidate(func(c *webrtc.ICECandidate) {
-		if c == nil {
-			log.Printf("[ICE] local candidate gathering complete")
-			return
-		}
-		candidate := c.ToJSON()
-		log.Printf("[ICE] local candidate: %s", candidate.Candidate)
-		candJSON, _ := json.Marshal(candidate)
-		msg, _ := json.Marshal(envelope{
-			Type:    "ice_candidate",
-			Payload: candJSON,
-		})
-		_ = a.writeSignal(msg)
-	})
-
-	go a.readSignaling()
-
-	if role == RolePhone {
-		offer, err := pc.CreateOffer(nil)
-		if err != nil {
-			return err
-		}
-		if err := pc.SetLocalDescription(offer); err != nil {
-			return err
-		}
-		offerJSON, _ := json.Marshal(offer)
-		msg, _ := json.Marshal(envelope{
-			Type:    "offer",
-			Payload: offerJSON,
-		})
-		_ = a.writeSignal(msg)
-	}
-
+	log.Printf("[App] disconnected")
 	return nil
 }
 
-func (a *App) SendCommand(cmdJSON string) error {
-	if a.dc == nil {
-		return nil
-	}
-	return a.dc.SendText(cmdJSON)
-}
-
-// ---------- internal ----------
-
-func (a *App) setupDataChannel(dc *webrtc.DataChannel) {
-	dc.OnClose(func() {
-		log.Printf("[App] DataChannel closed")
-		if a.getRole() == RoleComputer && a.getPeerConnected() {
-			a.startRelayCapture()
-			return
-		}
-		a.setPeerConnected(false)
-	})
-
-	dc.OnError(func(err error) {
-		log.Printf("[App] DataChannel error: %v", err)
-	})
-
-	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-		if msg.IsString && a.getRole() == RoleComputer {
-			log.Printf("[Command] received via DataChannel: %s", string(msg.Data))
-			a.handleCommand(string(msg.Data))
-		}
-	})
-
-	// 婵炶揪绲剧划鍫㈡嫻閻旂儤鍋栨い鎰剁到娴犳绱掗弮鎴濈伈缂佽鲸鐛憃mputer闂佹寧绋戦¨鈧紒杈ㄧ箚閵?DataChannel 閻庢鍠掗崑鎾绘煕濮樼厧鐏犻柟顔筋殔椤曪綁鍩€椤掍焦鍙忛悗锝庡亜閼靛綊姊洪锛勵槮闁活偄妫濋悰顕€寮撮悙鏉戭潛
-	dc.OnOpen(func() {
-		a.cancelRelayFallback()
-		a.setPeerConnected(true)
-		if a.getRole() != RoleComputer {
-			log.Printf("[App] DataChannel opened, no screen push needed for this role")
-			return
-		}
-		log.Printf("[App] DataChannel opened, start screen capture")
-		a.dc = dc
-		go func() {
-			sent := 0
-			frameID := uint32(0)
-			ScreenCapture(func(frame []byte) bool {
-				if dc.ReadyState() != webrtc.DataChannelStateOpen {
-					return false
-				}
-				if dc.BufferedAmount()+uint64(len(frame)) > 2*1024*1024 {
-					return true
-				}
-				frameID++
-				if err := sendFrameDataChannel(dc, frameID, frame); err != nil {
-					log.Printf("[App] datachannel frame send failed: %v", err)
-					return false
-				}
-				sent++
-				if sent == 1 || sent%50 == 0 {
-					log.Printf("[App] datachannel frames sent=%d frameBytes=%d", sent, len(frame))
-				}
-				return true
-			})
-		}()
-	})
-}
-
-func (a *App) scheduleRelayFallback(delay time.Duration, reason string) {
-	if a.getRole() != RoleComputer {
-		return
-	}
-
-	a.mu.Lock()
-	if a.relayFallbackTimer != nil {
-		a.relayFallbackTimer.Stop()
-	}
-	a.relayFallbackTimer = time.AfterFunc(delay, func() {
-		if !a.getPeerConnected() || a.dataChannelOpen() {
-			return
-		}
-		log.Printf("[App] WebRTC fallback timeout: %s", reason)
-		a.startRelayCapture()
-	})
-	a.mu.Unlock()
-}
-
-func (a *App) cancelRelayFallback() {
-	a.mu.Lock()
-	timer := a.relayFallbackTimer
-	a.relayFallbackTimer = nil
-	a.mu.Unlock()
-	if timer != nil {
-		timer.Stop()
-	}
-}
-
-func sendFrameDataChannel(dc *webrtc.DataChannel, frameID uint32, frame []byte) error {
-	if len(frame) <= frameChunkPayload {
-		return dc.Send(frame)
-	}
-
-	total := (len(frame) + frameChunkPayload - 1) / frameChunkPayload
-	if total > 65535 {
-		return dc.Send(frame)
-	}
-
-	for index := 0; index < total; index++ {
-		start := index * frameChunkPayload
-		end := start + frameChunkPayload
-		if end > len(frame) {
-			end = len(frame)
-		}
-		chunk := make([]byte, frameChunkHeader+end-start)
-		binary.BigEndian.PutUint32(chunk[0:4], frameChunkMagic)
-		binary.BigEndian.PutUint32(chunk[4:8], frameID)
-		binary.BigEndian.PutUint16(chunk[8:10], uint16(total))
-		binary.BigEndian.PutUint16(chunk[10:12], uint16(index))
-		copy(chunk[frameChunkHeader:], frame[start:end])
-		if err := dc.Send(chunk); err != nil {
-			return err
-		}
-	}
+func (a *App) ExecuteCommand(cmdJSON string) error {
+	log.Printf("[Command] execute: %s", cmdJSON)
+	a.handleCommand(cmdJSON)
 	return nil
-}
-
-func (a *App) startRelayCapture() {
-	if a.getRole() != RoleComputer {
-		return
-	}
-
-	a.mu.Lock()
-	if a.relayCaptureRunning {
-		a.mu.Unlock()
-		return
-	}
-	a.relayCaptureRunning = true
-	a.mu.Unlock()
-
-	go func() {
-		defer func() {
-			a.mu.Lock()
-			a.relayCaptureRunning = false
-			a.mu.Unlock()
-			log.Printf("[App] WebSocket relay capture stopped")
-		}()
-
-		sent := 0
-		log.Printf("[App] WebSocket relay capture started")
-		ScreenCapture(func(frame []byte) bool {
-			if !a.getPeerConnected() {
-				return false
-			}
-			if a.dataChannelOpen() {
-				return false
-			}
-			if err := a.writeSignalMessage(websocket.BinaryMessage, frame); err != nil {
-				log.Printf("[App] relay frame send failed: %v", err)
-				return false
-			}
-			sent++
-			if sent == 1 || sent%50 == 0 {
-				log.Printf("[App] relay frames sent %d, frame %d bytes", sent, len(frame))
-			}
-			return true
-		})
-	}()
 }
 
 func (a *App) handleCommand(raw string) {
 	var env envelope
 	if err := json.Unmarshal([]byte(raw), &env); err != nil {
-		log.Printf("[App] unmarshal error: %v", err)
+		log.Printf("[Command] unmarshal error: %v", err)
 		return
 	}
 	switch env.Type {
 	case "MOUSE_MOVE":
 		var d mouseMoveData
-		if err := json.Unmarshal(env.Payload, &d); err != nil {
-			return
+		if err := json.Unmarshal(env.Payload, &d); err == nil {
+			a.execMouseMove(d)
 		}
-		a.execMouseMove(d)
 	case "MOUSE_CLICK":
 		var d mouseClickData
-		if err := json.Unmarshal(env.Payload, &d); err != nil {
-			return
+		if err := json.Unmarshal(env.Payload, &d); err == nil {
+			a.execMouseClick(d)
 		}
-		a.execMouseClick(d)
 	case "KEY_PRESS":
 		var d keyPressData
-		if err := json.Unmarshal(env.Payload, &d); err != nil {
-			return
+		if err := json.Unmarshal(env.Payload, &d); err == nil {
+			a.execKeyPress(d)
 		}
-		a.execKeyPress(d)
 	case "SCROLL":
 		var d scrollData
-		if err := json.Unmarshal(env.Payload, &d); err != nil {
-			return
+		if err := json.Unmarshal(env.Payload, &d); err == nil {
+			a.execScroll(d)
 		}
-		a.execScroll(d)
 	}
 }
 
@@ -662,6 +277,9 @@ func (a *App) execMouseMove(d mouseMoveData) {
 		bounds.Min.Y = 0
 		bounds.Max.X = w
 		bounds.Max.Y = h
+	}
+	if w <= 0 || h <= 0 {
+		return
 	}
 
 	x := bounds.Min.X + int(d.XRatio*float64(w))
@@ -682,13 +300,18 @@ func (a *App) execMouseMove(d mouseMoveData) {
 }
 
 func (a *App) execMouseClick(d mouseClickData) {
-	switch d.Button {
-	case "left":
-		robotgo.MouseClick("left")
-	case "right":
-		robotgo.MouseClick("right")
-	case "middle":
-		robotgo.MouseClick("center")
+	button := d.Button
+	if button == "middle" {
+		button = "center"
+	}
+
+	switch d.Action {
+	case "down":
+		_ = robotgo.Toggle(button)
+	case "up":
+		_ = robotgo.Toggle(button, "up")
+	default:
+		robotgo.MouseClick(button)
 	}
 }
 
@@ -712,118 +335,6 @@ func (a *App) execScroll(d scrollData) {
 	} else {
 		for i := 0; i < -clicks; i++ {
 			robotgo.ScrollDir(1, "up")
-		}
-	}
-}
-
-func (a *App) readSignaling() {
-	a.mu.Lock()
-	conn := a.sigConn
-	a.mu.Unlock()
-	if conn == nil {
-		log.Printf("[App] signaling read skipped: no connection")
-		return
-	}
-
-	defer func() {
-		if !a.dataChannelOpen() {
-			a.setPeerConnected(false)
-		}
-		_ = conn.Close()
-	}()
-	for {
-		_, raw, err := conn.ReadMessage()
-		if err != nil {
-			log.Printf("[App] signaling read error: %v", err)
-			return
-		}
-		var env envelope
-		if err := json.Unmarshal(raw, &env); err != nil {
-			continue
-		}
-		switch env.Type {
-		case "session_assigned":
-			var sid string
-			json.Unmarshal(env.Payload, &sid)
-			a.sessionID = sid
-			log.Printf("[Signal] session assigned: %s", sid)
-
-		case "offer":
-			a.mu.Lock()
-			pc := a.pc
-			a.mu.Unlock()
-			if pc == nil {
-				log.Printf("[App] pc is nil, skipping")
-				continue
-			}
-
-			var desc webrtc.SessionDescription
-			json.Unmarshal(env.Payload, &desc)
-			if err := pc.SetRemoteDescription(desc); err != nil {
-				log.Printf("[App] SetRemoteDescription failed: %v", err)
-				continue
-			}
-			answer, err := pc.CreateAnswer(nil)
-			if err != nil {
-				log.Printf("[App] CreateAnswer failed: %v", err)
-				continue
-			}
-			if err := pc.SetLocalDescription(answer); err != nil {
-				log.Printf("[App] SetLocalDescription failed: %v", err)
-				continue
-			}
-			ansJSON, _ := json.Marshal(answer)
-			msg, _ := json.Marshal(envelope{Type: "answer", Payload: ansJSON})
-			_ = a.writeSignal(msg)
-
-		case "answer":
-			a.mu.Lock()
-			pc := a.pc
-			a.mu.Unlock()
-			if pc == nil {
-				continue
-			}
-			var desc webrtc.SessionDescription
-			json.Unmarshal(env.Payload, &desc)
-			if err := pc.SetRemoteDescription(desc); err != nil {
-				log.Printf("[App] SetRemoteDescription failed: %v", err)
-			}
-
-		case "ice_candidate":
-			a.mu.Lock()
-			pc := a.pc
-			a.mu.Unlock()
-			if pc == nil {
-				continue
-			}
-			var cand webrtc.ICECandidateInit
-			if err := json.Unmarshal(env.Payload, &cand); err != nil {
-				var candText string
-				if json.Unmarshal(env.Payload, &candText) == nil {
-					_ = json.Unmarshal([]byte(candText), &cand)
-				}
-			}
-			log.Printf("[ICE] remote candidate: %s", cand.Candidate)
-			if err := pc.AddICECandidate(cand); err != nil {
-				log.Printf("[ICE] AddICECandidate failed: %v", err)
-			}
-
-		case "peer_joined":
-			a.setPeerConnected(true)
-			log.Printf("[App] peer joined session %s", a.sessionID)
-			a.scheduleRelayFallback(12*time.Second, "peer joined but DataChannel is not open")
-
-		case "peer_left":
-			var leftRole string
-			_ = json.Unmarshal(env.Payload, &leftRole)
-			log.Printf("[App] peer left session %s: %s", a.sessionID, leftRole)
-			a.setPeerConnected(false)
-
-		case "MOUSE_MOVE", "MOUSE_CLICK", "KEY_PRESS", "SCROLL":
-			if a.getRole() == RoleComputer {
-				log.Printf("[Command] received via WebSocket relay: %s", env.Type)
-				a.handleCommand(string(raw))
-			}
 		}
 	}
 }

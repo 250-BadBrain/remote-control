@@ -35,13 +35,19 @@
     <div v-else class="control-area">
       <div class="status-bar">
         <span class="room-badge">{{ sessionId }}</span>
-        <span v-if="connectionMode === 'relay'" class="relay-badge">中继模式</span>
+        <span v-if="connectionMode === 'relay'" class="relay-badge">中继控制</span>
         <span v-else-if="connectionMode === 'connecting'" class="wait-badge">握手中...</span>
-        <span v-else class="direct-badge">直连</span>
+        <span v-else class="direct-badge">视频直连</span>
       </div>
 
       <div class="preview-bar">
-        <canvas ref="previewCanvas" class="preview-canvas" />
+        <video
+          ref="remoteVideo"
+          class="remote-video"
+          autoplay
+          playsinline
+          muted
+        />
       </div>
 
       <div class="pad-row">
@@ -60,15 +66,14 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, nextTick, watch } from 'vue'
+import { nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import nipplejs from 'nipplejs'
 import { buildIceServers } from '../utils/ice'
-import { handleIncomingFrame } from '../utils/frame'
 import { DEFAULT_SIGNAL_SERVER, getDefaultSignalServer } from '../utils/signal'
 
 type ConnMode = 'connecting' | 'webrtc' | 'relay'
-const connectionMode = ref<ConnMode>('connecting')
 
+const connectionMode = ref<ConnMode>('connecting')
 const inputCode = ref('')
 const inputServer = ref(getDefaultSignalServer() || DEFAULT_SIGNAL_SERVER)
 const errorMsg = ref('')
@@ -76,14 +81,14 @@ const connected = ref(false)
 const sessionId = ref('')
 const disconnectReason = ref('')
 
-const previewCanvas = ref<HTMLCanvasElement | null>(null)
+const remoteVideo = ref<HTMLVideoElement | null>(null)
 const joystickZone = ref<HTMLDivElement | null>(null)
 
 let ws: WebSocket | null = null
 let pc: RTCPeerConnection | null = null
 let dc: RTCDataChannel | null = null
 let joystick: nipplejs.JoystickManager | null = null
-let relayTimeout: ReturnType<typeof setTimeout> | null = null
+let remoteStream: MediaStream | null = null
 
 let cursorX = 0.5
 let cursorY = 0.5
@@ -108,6 +113,7 @@ function doConnect() {
 }
 
 function connect(code: string, addr: string) {
+  cleanupPeer()
   sessionId.value = code
   disconnectReason.value = ''
   const url = `${addr}/connect/phone?sid=${encodeURIComponent(code)}`
@@ -119,18 +125,7 @@ function connect(code: string, addr: string) {
   }
 
   ws.onmessage = (evt: MessageEvent) => {
-    if (evt.data instanceof Blob) {
-      if (connectionMode.value === 'webrtc' && dc?.readyState === 'open') return
-      connectionMode.value = 'relay'
-      handleIncomingFrame(evt.data, onVideoFrame)
-      return
-    }
-    if (evt.data instanceof ArrayBuffer) {
-      if (connectionMode.value === 'webrtc' && dc?.readyState === 'open') return
-      connectionMode.value = 'relay'
-      handleIncomingFrame(evt.data, onVideoFrame)
-      return
-    }
+    if (typeof evt.data !== 'string') return
     try {
       onSignalMessage(JSON.parse(evt.data))
     } catch { /* ignore */ }
@@ -150,16 +145,13 @@ function onSignalMessage(msg: { type: string; payload?: any }) {
     case 'peer_joined':
       startWebRTC()
       return
-    case 'offer':
-      handleOffer(msg.payload)
-      return
     case 'answer':
       handleAnswer(msg.payload)
       return
     case 'ice_candidate':
       if (pc && msg.payload) {
         const candidate = typeof msg.payload === 'string' ? JSON.parse(msg.payload) : msg.payload
-        pc.addIceCandidate(candidate).catch(() => {})
+        pc.addIceCandidate(candidate).catch((err) => console.warn('[Mobile] add ICE failed:', err))
       }
       return
     case 'peer_left':
@@ -173,32 +165,40 @@ function handleDisconnected(reason: string) {
   errorMsg.value = reason
   connected.value = false
   connectionMode.value = 'connecting'
-  if (relayTimeout) { clearTimeout(relayTimeout); relayTimeout = null }
-  joystick?.destroy()
-  joystick = null
-  dc?.close()
-  dc = null
-  pc?.close()
-  pc = null
+  cleanupPeer()
 }
 
 function startWebRTC() {
-  const iceServers = buildIceServers()
-  console.info('[Mobile] ICE servers:', iceServers.map((s) => s.urls))
+  cleanupPeer(false)
   const cfg: RTCConfiguration = {
-    iceServers,
+    iceServers: buildIceServers(),
     iceTransportPolicy: 'all',
   }
   pc = new RTCPeerConnection(cfg)
+  remoteStream = new MediaStream()
+  if (remoteVideo.value) remoteVideo.value.srcObject = remoteStream
+
+  pc.addTransceiver('video', { direction: 'recvonly' })
+
+  pc.ontrack = (evt) => {
+    for (const track of evt.streams[0]?.getTracks() || [evt.track]) {
+      if (!remoteStream!.getTracks().some((item) => item.id === track.id)) {
+        remoteStream!.addTrack(track)
+      }
+    }
+    if (remoteVideo.value) {
+      remoteVideo.value.srcObject = remoteStream
+      remoteVideo.value.play().catch(() => {})
+    }
+  }
 
   pc.onconnectionstatechange = () => {
-    const state = pc!.connectionState
-    console.log('[Mobile] connection state:', state)
+    const state = pc?.connectionState
+    console.info('[Mobile] connection state:', state)
     if (state === 'connected') {
       connectionMode.value = 'webrtc'
-      if (relayTimeout) { clearTimeout(relayTimeout); relayTimeout = null }
     } else if (state === 'failed' || state === 'disconnected') {
-      console.warn('[Mobile] WebRTC unavailable, fallback to relay')
+      console.warn('[Mobile] WebRTC unavailable; control may use WebSocket relay')
       connectionMode.value = 'relay'
     }
   }
@@ -216,39 +216,19 @@ function startWebRTC() {
     }
   }
 
-  dc = pc.createDataChannel('control')
-  dc.binaryType = 'blob'
+  dc = pc.createDataChannel('control', { ordered: false, maxRetransmits: 0 })
   dc.onopen = () => {
-    console.log('[Mobile] DataChannel opened')
+    console.info('[Mobile] control DataChannel opened')
     connectionMode.value = 'webrtc'
   }
   dc.onclose = () => {
-    console.warn('[Mobile] DataChannel closed, fallback to relay')
+    console.warn('[Mobile] control DataChannel closed')
     connectionMode.value = 'relay'
   }
-  dc.onmessage = (evt: MessageEvent) => {
-    handleIncomingFrame(evt.data, onVideoFrame)
-  }
-
-  relayTimeout = setTimeout(() => {
-    if (connectionMode.value === 'connecting') {
-      console.warn('[Mobile] WebRTC handshake timeout, fallback to relay')
-      connectionMode.value = 'relay'
-    }
-  }, 12000)
 
   pc.createOffer()
     .then((offer) => pc!.setLocalDescription(offer))
     .then(() => sendToSignal(buildEnv('offer', pc!.localDescription)))
-    .catch(console.error)
-}
-
-function handleOffer(desc: any) {
-  if (!pc) return
-  pc.setRemoteDescription(new RTCSessionDescription(desc))
-  pc.createAnswer()
-    .then((answer) => pc!.setLocalDescription(answer))
-    .then(() => sendToSignal(buildEnv('answer', pc!.localDescription)))
     .catch(console.error)
 }
 
@@ -257,49 +237,17 @@ function handleAnswer(desc: any) {
   pc.setRemoteDescription(new RTCSessionDescription(desc)).catch(console.error)
 }
 
-let isRendering = false
-
-async function onVideoFrame(blob: Blob) {
-  if (isRendering) return
-  isRendering = true
-  try {
-    const bitmap = await createImageBitmap(blob, { colorSpaceConversion: 'none' })
-    try {
-      const canvas = previewCanvas.value
-      if (!canvas) { bitmap.close(); return }
-      const ctx = canvas.getContext('2d')
-      if (!ctx) { bitmap.close(); return }
-
-      if (canvas.width !== canvas.clientWidth || canvas.height !== canvas.clientHeight) {
-        canvas.width = canvas.clientWidth
-        canvas.height = canvas.clientHeight
-      }
-      ctx.imageSmoothingEnabled = true
-      ctx.imageSmoothingQuality = 'high'
-      const scale = Math.min(canvas.width / bitmap.width, canvas.height / bitmap.height)
-      const dx = (canvas.width - bitmap.width * scale) / 2
-      const dy = (canvas.height - bitmap.height * scale) / 2
-      ctx.clearRect(0, 0, canvas.width, canvas.height)
-      ctx.drawImage(bitmap, dx, dy, bitmap.width * scale, bitmap.height * scale)
-      bitmap.close()
-    } catch { bitmap.close() }
-  } catch { /* ignore bad frame */ }
-  finally { isRendering = false }
-}
-
 function sendCommand(type: string, data: unknown) {
   const payload = { type, payload: data }
-  if (connectionMode.value === 'relay' || dc?.readyState !== 'open') {
-    console.debug('[Mobile] send relay command:', type)
-    sendToSignal(buildEnv('forward', { from: 'phone', payload }))
-  } else {
-    console.debug('[Mobile] send datachannel command:', type)
+  if (dc?.readyState === 'open') {
     dc.send(JSON.stringify(payload))
+  } else {
+    sendToSignal(buildEnv('forward', { from: 'phone', payload }))
   }
 }
 
-const THROTTLE_MS = 50
-const MIN_DELTA = 0.005
+const THROTTLE_MS = 28
+const MIN_DELTA = 0.002
 let lastSendTime = 0
 let lastJoyX = -1
 let lastJoyY = -1
@@ -317,9 +265,9 @@ async function initJoystick() {
   })
 
   joystick.on('move', (_evt, data: nipplejs.JoystickOutputData) => {
-    if (data.force < 0.05) return
+    if (data.force < 0.04) return
 
-    const speed = 0.008
+    const speed = 0.0065
     const dx = Math.cos(data.angle!.radian) * data.force * speed
     const dy = -Math.sin(data.angle!.radian) * data.force * speed
 
@@ -342,6 +290,21 @@ async function initJoystick() {
   })
 }
 
+function cleanupPeer(closeWS = true) {
+  joystick?.destroy()
+  joystick = null
+  dc?.close()
+  dc = null
+  pc?.close()
+  pc = null
+  remoteStream = null
+  if (remoteVideo.value) remoteVideo.value.srcObject = null
+  if (closeWS) {
+    ws?.close()
+    ws = null
+  }
+}
+
 onMounted(() => {
   if (connected.value) initJoystick()
 })
@@ -356,11 +319,7 @@ watch(connected, (value) => {
 })
 
 onUnmounted(() => {
-  if (relayTimeout) clearTimeout(relayTimeout)
-  joystick?.destroy()
-  dc?.close()
-  pc?.close()
-  ws?.close()
+  cleanupPeer()
 })
 
 function clickLeft() {
@@ -432,8 +391,6 @@ function clickRight() {
   background: #1e293b;
   color: #e2e8f0;
   outline: none;
-  box-shadow: 0 0 0 0 rgba(79, 70, 229, 0);
-  transition: border-color 160ms ease, box-shadow 160ms ease, background 160ms ease;
 }
 
 .code-input {
@@ -455,7 +412,6 @@ function clickRight() {
   padding: 0 0.9rem;
   border-radius: 8px;
   font-size: 0.95rem;
-  text-align: left;
 }
 
 .code-input::placeholder,
@@ -464,13 +420,6 @@ function clickRight() {
   opacity: 1;
   letter-spacing: 0;
   text-indent: 0;
-}
-
-.code-input:focus,
-.server-input:focus {
-  border-color: #6366f1;
-  background: #223047;
-  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.22);
 }
 
 .btn-connect {
@@ -483,13 +432,6 @@ function clickRight() {
   border-radius: 10px;
   font-size: 1.05rem;
   font-weight: 700;
-  cursor: pointer;
-  touch-action: manipulation;
-}
-
-.btn-connect:active {
-  background: #4338ca;
-  transform: translateY(1px);
 }
 
 .error {
@@ -497,7 +439,6 @@ function clickRight() {
   margin: 0;
   color: #fca5a5;
   font-size: 0.88rem;
-  line-height: 1.35;
   text-align: center;
 }
 
@@ -519,30 +460,19 @@ function clickRight() {
   background: #1e293b;
   font-size: 0.78rem;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  white-space: nowrap;
-  overflow: hidden;
 }
 
-.room-badge {
+.room-badge,
+.direct-badge {
   color: #22c55e;
 }
 
 .relay-badge {
   color: #f59e0b;
-  animation: pulse 1.5s ease-in-out infinite;
 }
 
 .wait-badge {
   color: #60a5fa;
-}
-
-.direct-badge {
-  color: #22c55e;
-}
-
-@keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.6; }
 }
 
 .preview-bar {
@@ -553,7 +483,7 @@ function clickRight() {
   border-bottom: 1px solid #1e293b;
 }
 
-.preview-canvas {
+.remote-video {
   display: block;
   width: 100%;
   height: 100%;
@@ -597,7 +527,6 @@ function clickRight() {
   font-size: 0.92rem;
   font-weight: 700;
   color: #fff;
-  cursor: pointer;
   touch-action: manipulation;
 }
 
@@ -607,12 +536,10 @@ function clickRight() {
 
 .btn-left {
   background: #2563eb;
-  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.35);
 }
 
 .btn-right {
   background: #dc2626;
-  box-shadow: 0 4px 12px rgba(220, 38, 38, 0.35);
 }
 
 @media (max-height: 680px) {

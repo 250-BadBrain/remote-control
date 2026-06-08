@@ -1,4 +1,4 @@
-﻿<template>
+<template>
   <div class="dashboard">
     <header class="header">
       <h1>远程控制</h1>
@@ -22,6 +22,12 @@
     </section>
 
     <section class="card">
+      <h2>屏幕共享</h2>
+      <video ref="previewRef" class="preview" autoplay muted playsinline />
+      <p class="hint">{{ streamStatus }}</p>
+    </section>
+
+    <section class="card">
       <h2>控制端设备</h2>
       <ul class="device-list" v-if="devices.length">
         <li v-for="d in devices" :key="d.id">{{ d.name }} - {{ d.status }}</li>
@@ -31,29 +37,49 @@
     </section>
 
     <button class="btn-primary" @click="startSession" :disabled="connecting">
-      {{ connecting ? '连接中...' : '启动会话' }}
+      {{ connecting ? '连接中...' : connected ? '重新启动会话' : '启动会话' }}
     </button>
-
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
+import { computed, onUnmounted, ref } from 'vue'
+import { buildIceServers } from '../utils/ice'
 import { DEFAULT_SIGNAL_SERVER, getDefaultSignalServer } from '../utils/signal'
+
+type Envelope = {
+  type: string
+  payload?: any
+}
 
 const go = (window as any).go
 const app = go?.main?.App
 
+const serverAddr = ref(getDefaultSignalServer() || DEFAULT_SIGNAL_SERVER)
 const sessionId = ref('')
 const connected = ref(false)
 const connecting = ref(false)
-const devices = ref<{ id: string; name: string; status: string }[]>([])
+const peerReady = ref(false)
 const disconnectNotice = ref('')
-let peerPoll: ReturnType<typeof setInterval> | null = null
-let hadPeer = false
+const streamStatus = ref('启动会话后会请求选择要共享的屏幕')
+const previewRef = ref<HTMLVideoElement | null>(null)
 
-/* 鏈嶅姟绔湴鍧€榛樿涓烘湰鏈猴紝鐢ㄦ埛鍙牴鎹疄闄呭眬鍩熺綉 IP 淇敼 */
-const serverAddr = ref(getDefaultSignalServer() || DEFAULT_SIGNAL_SERVER)
+let ws: WebSocket | null = null
+let pc: RTCPeerConnection | null = null
+let dc: RTCDataChannel | null = null
+let screenStream: MediaStream | null = null
+
+const devices = computed(() => peerReady.value
+  ? [{ id: 'phone', name: '手机浏览器', status: '已接入' }]
+  : [])
+
+function buildEnv(type: string, payload: unknown) {
+  return JSON.stringify({ type, payload })
+}
+
+function sendToSignal(msg: string) {
+  if (ws?.readyState === WebSocket.OPEN) ws.send(msg)
+}
 
 function copyCode() {
   navigator.clipboard?.writeText(sessionId.value)
@@ -62,59 +88,211 @@ function copyCode() {
 async function startSession() {
   if (connecting.value) return
   connecting.value = true
+  disconnectNotice.value = ''
 
-  if (!app?.Connect) {
-    sessionId.value = Math.random().toString(36).substring(2, 8).toUpperCase()
-    connected.value = true
-    connecting.value = false
-    return
-  }
+  await cleanup()
 
   try {
-    await app.Connect('computer', serverAddr.value, '')
-    sessionId.value = await app.GetSessionID()
-    connected.value = true
-  } catch (err: any) {
-    console.error('[Dashboard] 连接失败:', err)
-  }
-  connecting.value = false
-}
+    await ensureScreenStream()
+    const addr = (serverAddr.value.trim() || DEFAULT_SIGNAL_SERVER).replace(/\/+$/, '')
+    ws = new WebSocket(`${addr}/connect/computer`)
 
-async function refreshPeerStatus() {
-  if (!app?.GetPeerConnected) return
-  const ready = await app.GetPeerConnected()
-  if (ready) {
-    hadPeer = true
-    disconnectNotice.value = ''
-  } else if (hadPeer) {
-    disconnectNotice.value = '控制端已断开，等待新的设备接入'
-    hadPeer = false
-  }
-  devices.value = ready
-    ? [{ id: 'phone', name: '手机浏览器', status: '已接入' }]
-    : []
-}
-
-onMounted(async () => {
-  if (app?.GetSessionID) {
-    const id = await app.GetSessionID()
-    if (id) {
-      sessionId.value = id
+    ws.onopen = () => {
       connected.value = true
+      streamStatus.value = '信令已连接，等待手机接入'
+    }
+
+    ws.onmessage = (evt) => {
+      if (typeof evt.data !== 'string') return
+      try {
+        onSignalMessage(JSON.parse(evt.data))
+      } catch {
+        /* ignore */
+      }
+    }
+
+    ws.onclose = () => {
+      connected.value = false
+      peerReady.value = false
+      disconnectNotice.value = '信令连接已断开'
+    }
+
+    ws.onerror = () => {
+      disconnectNotice.value = '无法连接信令服务器'
+    }
+  } catch (err) {
+    console.error('[Dashboard] start failed:', err)
+    disconnectNotice.value = err instanceof Error ? err.message : '启动失败'
+    await cleanup()
+  } finally {
+    connecting.value = false
+  }
+}
+
+async function ensureScreenStream() {
+  if (screenStream) return
+  if (!navigator.mediaDevices?.getDisplayMedia) {
+    throw new Error('当前 WebView 不支持屏幕视频采集')
+  }
+
+  screenStream = await navigator.mediaDevices.getDisplayMedia({
+    video: {
+      frameRate: { ideal: 30, max: 30 },
+      width: { ideal: 1920 },
+      height: { ideal: 1080 },
+    },
+    audio: false,
+  })
+
+  const track = screenStream.getVideoTracks()[0]
+  track.onended = () => {
+    streamStatus.value = '屏幕共享已停止'
+    cleanup()
+  }
+
+  if (previewRef.value) {
+    previewRef.value.srcObject = screenStream
+  }
+  streamStatus.value = '屏幕视频流已准备好'
+}
+
+async function getLocalIceServers() {
+  if (app?.GetFrontendICEServers) {
+    const servers = await app.GetFrontendICEServers()
+    return servers.map((server: { urls: string[]; username?: string; credential?: string }) => ({
+      urls: server.urls,
+      username: server.username,
+      credential: server.credential,
+    }))
+  }
+  return buildIceServers()
+}
+
+async function createPeerConnection() {
+  pc?.close()
+  dc = null
+
+  const cfg: RTCConfiguration = {
+    iceServers: await getLocalIceServers(),
+    iceTransportPolicy: 'all',
+  }
+  pc = new RTCPeerConnection(cfg)
+
+  pc.onicecandidate = (evt) => {
+    if (evt.candidate) {
+      console.info('[Dashboard] local ICE candidate:', evt.candidate.type, evt.candidate.protocol, evt.candidate.address, evt.candidate.port)
+      sendToSignal(buildEnv('ice_candidate', evt.candidate.toJSON()))
+    } else {
+      console.info('[Dashboard] ICE gathering completed')
     }
   }
-  await refreshPeerStatus()
-  peerPoll = setInterval(refreshPeerStatus, 1000)
-})
+
+  pc.onconnectionstatechange = () => {
+    const state = pc?.connectionState
+    console.info('[Dashboard] connection state:', state)
+    if (state === 'connected') {
+      peerReady.value = true
+      disconnectNotice.value = ''
+      streamStatus.value = '视频直连已建立'
+    } else if (state === 'failed' || state === 'disconnected' || state === 'closed') {
+      peerReady.value = false
+      if (connected.value) disconnectNotice.value = '控制端连接已断开'
+    }
+  }
+
+  pc.ondatachannel = (evt) => {
+    dc = evt.channel
+    dc.onopen = () => {
+      peerReady.value = true
+      console.info('[Dashboard] control DataChannel opened')
+    }
+    dc.onclose = () => {
+      peerReady.value = false
+      console.warn('[Dashboard] control DataChannel closed')
+    }
+    dc.onmessage = (evt) => {
+      if (typeof evt.data === 'string') {
+        app?.ExecuteCommand?.(evt.data)
+      }
+    }
+  }
+
+  for (const track of screenStream?.getVideoTracks() || []) {
+    pc.addTrack(track, screenStream!)
+  }
+}
+
+async function onSignalMessage(msg: Envelope) {
+  switch (msg.type) {
+    case 'session_assigned':
+      sessionId.value = msg.payload
+      return
+
+    case 'peer_joined':
+      streamStatus.value = '手机已接入，等待 WebRTC offer'
+      return
+
+    case 'offer':
+      await handleOffer(msg.payload)
+      return
+
+    case 'ice_candidate':
+      if (pc && msg.payload) {
+        const candidate = typeof msg.payload === 'string' ? JSON.parse(msg.payload) : msg.payload
+        await pc.addIceCandidate(candidate).catch((err) => console.warn('[Dashboard] add ICE failed:', err))
+      }
+      return
+
+    case 'peer_left':
+      peerReady.value = false
+      disconnectNotice.value = '控制端已断开，等待新的设备接入'
+      pc?.close()
+      pc = null
+      dc = null
+      return
+
+    case 'MOUSE_MOVE':
+    case 'MOUSE_CLICK':
+    case 'KEY_PRESS':
+    case 'SCROLL':
+      app?.ExecuteCommand?.(JSON.stringify({ type: msg.type, payload: msg.payload }))
+      return
+  }
+}
+
+async function handleOffer(desc: RTCSessionDescriptionInit) {
+  await ensureScreenStream()
+  await createPeerConnection()
+  await pc!.setRemoteDescription(new RTCSessionDescription(desc))
+  const answer = await pc!.createAnswer()
+  await pc!.setLocalDescription(answer)
+  sendToSignal(buildEnv('answer', pc!.localDescription))
+  streamStatus.value = '已发送视频 answer，正在建立直连'
+}
+
+async function cleanup() {
+  dc?.close()
+  dc = null
+  pc?.close()
+  pc = null
+  ws?.close()
+  ws = null
+  if (screenStream) {
+    for (const track of screenStream.getTracks()) track.stop()
+  }
+  screenStream = null
+  if (previewRef.value) previewRef.value.srcObject = null
+  peerReady.value = false
+}
 
 onUnmounted(() => {
-  if (peerPoll) clearInterval(peerPoll)
+  cleanup()
 })
 </script>
 
 <style scoped>
 .dashboard {
-  max-width: 640px;
+  max-width: 760px;
   margin: 0 auto;
   padding: 2rem;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -175,7 +353,7 @@ onUnmounted(() => {
 .hint {
   font-size: 0.8rem;
   color: #666;
-  margin-top: 0.5rem;
+  margin: 0.5rem 0 0;
 }
 .label-sm {
   display: block;
@@ -190,6 +368,14 @@ onUnmounted(() => {
   border-radius: 4px;
   font-size: 0.85rem;
   box-sizing: border-box;
+}
+.preview {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  background: #000;
+  border-radius: 6px;
+  object-fit: contain;
 }
 .device-list {
   list-style: none;
@@ -225,14 +411,5 @@ onUnmounted(() => {
 }
 .btn-primary:hover:not(:disabled) {
   background: #4338ca;
-}
-.links {
-  margin-top: 1rem;
-  text-align: center;
-}
-.links a {
-  color: #4f46e5;
-  font-size: 0.9rem;
-  text-decoration: none;
 }
 </style>
