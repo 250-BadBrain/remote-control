@@ -6,12 +6,14 @@
       autoplay
       playsinline
       muted
+      tabindex="0"
       @mousemove="onMouseMove"
       @mousedown="onMouseDown"
       @mouseup="onMouseUp"
       @wheel.prevent="onScroll"
     />
     <div class="toolbar">
+      <button class="back-btn" @click="router.push('/')">返回</button>
       <span class="badge" :class="connected ? 'status-ok' : 'status-err'">
         {{ connected ? `已连接 ${sessionId}` : '未连接' }}
       </span>
@@ -25,15 +27,18 @@
 
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { buildIceServers } from '../utils/ice'
 import { DEFAULT_SIGNAL_SERVER, getDefaultSignalServer } from '../utils/signal'
 
 type ConnMode = 'connecting' | 'webrtc' | 'relay'
 
+const router = useRouter()
+const route = useRoute()
 const connectionMode = ref<ConnMode>('connecting')
-const params = new URLSearchParams(window.location.hash.split('?')[1] || '')
-const roomCode = params.get('code') || ''
-const signalAddr = (params.get('signal') || getDefaultSignalServer() || DEFAULT_SIGNAL_SERVER).replace(/\/+$/, '')
+
+const roomCode = String(route.query.code || '')
+const signalAddr = String(route.query.signal || getDefaultSignalServer() || DEFAULT_SIGNAL_SERVER).replace(/\/+$/, '')
 
 const videoRef = ref<HTMLVideoElement | null>(null)
 const coords = ref('x: 0.000  y: 0.000')
@@ -55,12 +60,15 @@ function sendToSignal(msg: string) {
 }
 
 function connect() {
-  const sid = roomCode || `viewer_${Math.random().toString(36).slice(2, 8)}`
-  sessionId.value = sid
+  if (!roomCode) {
+    router.push('/')
+    return
+  }
+
+  sessionId.value = roomCode
   disconnectReason.value = ''
 
-  ws = new WebSocket(`${signalAddr}/connect/phone?sid=${encodeURIComponent(sid)}`)
-  ws.binaryType = 'blob'
+  ws = new WebSocket(`${signalAddr}/connect/phone?sid=${encodeURIComponent(roomCode)}`)
 
   ws.onopen = () => {
     connected.value = true
@@ -70,7 +78,9 @@ function connect() {
     if (typeof evt.data !== 'string') return
     try {
       onSignalMessage(JSON.parse(evt.data))
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   }
 
   ws.onclose = () => {
@@ -96,7 +106,7 @@ function onSignalMessage(msg: { type: string; payload?: any }) {
       }
       return
     case 'peer_left':
-      handleDisconnected('电脑受控端已断开')
+      handleDisconnected('受控端已断开')
       return
   }
 }
@@ -133,7 +143,6 @@ function startWebRTC() {
 
   pc.onconnectionstatechange = () => {
     const state = pc?.connectionState
-    console.info('[Viewer] connection state:', state)
     if (state === 'connected') {
       connectionMode.value = 'webrtc'
     } else if (state === 'failed' || state === 'disconnected') {
@@ -157,13 +166,16 @@ function startWebRTC() {
 
   pc.createOffer()
     .then((offer) => pc!.setLocalDescription(offer))
-    .then(() => sendToSignal(buildEnv('offer', pc!.localDescription)))
-    .catch(console.error)
+    .then(() => sendToSignal(buildEnv('offer', {
+      description: pc!.localDescription,
+      profile: 'desktop',
+    })))
+    .catch((err) => console.warn('[Viewer] create offer failed:', err))
 }
 
 function handleAnswer(desc: any) {
   if (!pc) return
-  pc.setRemoteDescription(new RTCSessionDescription(desc)).catch(console.error)
+  pc.setRemoteDescription(new RTCSessionDescription(desc)).catch((err) => console.warn('[Viewer] set remote description failed:', err))
 }
 
 const THROTTLE_MS = 28
@@ -201,9 +213,31 @@ function ratios(e: MouseEvent) {
   const el = videoRef.value
   if (!el) return { xRatio: 0, yRatio: 0 }
   const rect = el.getBoundingClientRect()
+
+  const videoW = el.videoWidth || rect.width
+  const videoH = el.videoHeight || rect.height
+  const videoAspect = videoW / videoH
+  const boxAspect = rect.width / rect.height
+
+  let contentW = rect.width
+  let contentH = rect.height
+  let offsetX = 0
+  let offsetY = 0
+
+  if (boxAspect > videoAspect) {
+    contentW = rect.height * videoAspect
+    offsetX = (rect.width - contentW) / 2
+  } else if (boxAspect < videoAspect) {
+    contentH = rect.width / videoAspect
+    offsetY = (rect.height - contentH) / 2
+  }
+
+  const x = (e.clientX - rect.left - offsetX) / contentW
+  const y = (e.clientY - rect.top - offsetY) / contentH
+
   return {
-    xRatio: (e.clientX - rect.left) / rect.width,
-    yRatio: (e.clientY - rect.top) / rect.height,
+    xRatio: Math.max(0, Math.min(1, x)),
+    yRatio: Math.max(0, Math.min(1, y)),
   }
 }
 
@@ -231,6 +265,7 @@ const onMouseMove = throttle((e: MouseEvent) => {
 }, THROTTLE_MS)
 
 function onMouseDown(e: MouseEvent) {
+  videoRef.value?.focus()
   const btn = e.button === 0 ? 'left' : e.button === 2 ? 'right' : 'middle'
   sendCommand('MOUSE_CLICK', { button: btn, action: 'down' })
 }
@@ -258,7 +293,7 @@ function cleanupPeer(closeWS = true) {
 }
 
 onMounted(() => {
-  if (roomCode) connect()
+  connect()
 })
 
 onUnmounted(() => {
@@ -290,12 +325,21 @@ onUnmounted(() => {
   left: 0;
   right: 0;
   display: flex;
+  align-items: center;
   gap: 0.75rem;
   padding: 0.5rem 1rem;
   background: rgba(0, 0, 0, 0.6);
   color: #fff;
   font-size: 0.8rem;
   font-family: monospace;
+}
+.back-btn {
+  border: 0;
+  border-radius: 3px;
+  padding: 0.15rem 0.5rem;
+  background: #334155;
+  color: #fff;
+  cursor: pointer;
 }
 .badge {
   padding: 0.15rem 0.5rem;

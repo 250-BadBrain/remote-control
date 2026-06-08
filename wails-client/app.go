@@ -65,6 +65,8 @@ type App struct {
 
 	screenW  int
 	screenH  int
+	screenX  int
+	screenY  int
 	logicalW int
 	logicalH int
 	dpiScale float64
@@ -79,12 +81,9 @@ func (a *App) startup(ctx context.Context) {
 	setupClientLog()
 	enableDPIAwareness()
 	a.refreshScreenInfo()
-	log.Printf("[App] screen physical=%dx%d logical=%dx%d dpiScale=%.2f",
-		a.screenW, a.screenH, a.logicalW, a.logicalH, a.dpiScale)
 }
 
 func (a *App) shutdown(ctx context.Context) {
-	log.Printf("[App] shutdown requested")
 	_ = a.Disconnect()
 }
 
@@ -100,23 +99,38 @@ func setupClientLog() {
 	}
 	log.SetOutput(logFile)
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
-	log.Printf("[App] log file: %s", logPath)
 }
 
 func (a *App) refreshScreenInfo() {
-	a.screenW, a.screenH = robotgo.GetScreenSize()
-	if a.screenW <= 0 || a.screenH <= 0 {
-		bounds := screenshot.GetDisplayBounds(0)
-		a.screenW = bounds.Dx()
-		a.screenH = bounds.Dy()
-		log.Printf("[App] robotgo screen size unavailable, fallback to screenshot bounds")
+	bounds := screenshot.GetDisplayBounds(0)
+	screenX := bounds.Min.X
+	screenY := bounds.Min.Y
+	screenW := bounds.Dx()
+	screenH := bounds.Dy()
+	if screenW <= 0 || screenH <= 0 {
+		w, h := robotgo.GetScreenSize()
+		screenX = 0
+		screenY = 0
+		screenW = w
+		screenH = h
+		log.Printf("[WARN] screenshot bounds unavailable, fallback to robotgo screen size")
 	}
-	a.dpiScale = getDPIScale()
-	if a.dpiScale <= 0 {
-		a.dpiScale = 1.0
+	dpiScale := getDPIScale()
+	if dpiScale <= 0 {
+		dpiScale = 1.0
 	}
-	a.logicalW = int(float64(a.screenW) / a.dpiScale)
-	a.logicalH = int(float64(a.screenH) / a.dpiScale)
+	logicalW := int(float64(screenW) / dpiScale)
+	logicalH := int(float64(screenH) / dpiScale)
+
+	a.mu.Lock()
+	a.screenX = screenX
+	a.screenY = screenY
+	a.screenW = screenW
+	a.screenH = screenH
+	a.dpiScale = dpiScale
+	a.logicalW = logicalW
+	a.logicalH = logicalH
+	a.mu.Unlock()
 }
 
 func getDPIScale() float64 {
@@ -177,7 +191,6 @@ func buildFrontendICEServers() []frontendICEServer {
 	}
 	credential := strings.TrimSpace(os.Getenv("TURN_PASSWORD"))
 	if credential == "" {
-		log.Printf("[ICE] frontend TURN disabled: TURN_PASSWORD is not set")
 		return servers
 	}
 
@@ -191,7 +204,6 @@ func buildFrontendICEServers() []frontendICEServer {
 		Username:   username,
 		Credential: credential,
 	})
-	log.Printf("[ICE] frontend TURN enabled: urls=%v username=%s", urls, username)
 	return servers
 }
 
@@ -227,12 +239,10 @@ func (a *App) Disconnect() error {
 	a.mu.Lock()
 	a.peerReady = false
 	a.mu.Unlock()
-	log.Printf("[App] disconnected")
 	return nil
 }
 
 func (a *App) ExecuteCommand(cmdJSON string) error {
-	log.Printf("[Command] execute: %s", cmdJSON)
 	a.handleCommand(cmdJSON)
 	return nil
 }
@@ -240,7 +250,7 @@ func (a *App) ExecuteCommand(cmdJSON string) error {
 func (a *App) handleCommand(raw string) {
 	var env envelope
 	if err := json.Unmarshal([]byte(raw), &env); err != nil {
-		log.Printf("[Command] unmarshal error: %v", err)
+		log.Printf("[WARN] command unmarshal failed: %v", err)
 		return
 	}
 	switch env.Type {
@@ -268,32 +278,32 @@ func (a *App) handleCommand(raw string) {
 }
 
 func (a *App) execMouseMove(d mouseMoveData) {
-	bounds := screenshot.GetDisplayBounds(0)
-	w := bounds.Dx()
-	h := bounds.Dy()
+	a.mu.Lock()
+	x0, y0, w, h := a.screenX, a.screenY, a.screenW, a.screenH
+	a.mu.Unlock()
+
 	if w <= 0 || h <= 0 {
-		w, h = robotgo.GetScreenSize()
-		bounds.Min.X = 0
-		bounds.Min.Y = 0
-		bounds.Max.X = w
-		bounds.Max.Y = h
+		a.refreshScreenInfo()
+		a.mu.Lock()
+		x0, y0, w, h = a.screenX, a.screenY, a.screenW, a.screenH
+		a.mu.Unlock()
 	}
 	if w <= 0 || h <= 0 {
 		return
 	}
 
-	x := bounds.Min.X + int(d.XRatio*float64(w))
-	y := bounds.Min.Y + int(d.YRatio*float64(h))
+	x := x0 + int(d.XRatio*float64(w))
+	y := y0 + int(d.YRatio*float64(h))
 
-	if x < bounds.Min.X {
-		x = bounds.Min.X
-	} else if x >= bounds.Max.X {
-		x = bounds.Max.X - 1
+	if x < x0 {
+		x = x0
+	} else if x >= x0+w {
+		x = x0 + w - 1
 	}
-	if y < bounds.Min.Y {
-		y = bounds.Min.Y
-	} else if y >= bounds.Max.Y {
-		y = bounds.Max.Y - 1
+	if y < y0 {
+		y = y0
+	} else if y >= y0+h {
+		y = y0 + h - 1
 	}
 
 	setCursorPos(x, y)

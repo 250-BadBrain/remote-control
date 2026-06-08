@@ -47,10 +47,10 @@
       <div class="pad-row">
         <div ref="joystickZone" class="joystick-zone" />
         <div class="btn-group">
-          <button class="touch-btn btn-left" @touchstart.prevent="clickLeft" @touchend.prevent>
+          <button class="touch-btn btn-left" @pointerdown.prevent="clickLeft">
             <span>左键</span>
           </button>
-          <button class="touch-btn btn-right" @touchstart.prevent="clickRight" @touchend.prevent>
+          <button class="touch-btn btn-right" @pointerdown.prevent="clickRight">
             <span>右键</span>
           </button>
         </div>
@@ -187,7 +187,6 @@ function startWebRTC() {
 
   pc.onconnectionstatechange = () => {
     const state = pc?.connectionState
-    console.info('[Mobile] connection state:', state)
     if (state === 'connected') {
       connectionMode.value = 'webrtc'
     } else if (state === 'failed' || state === 'disconnected') {
@@ -196,22 +195,12 @@ function startWebRTC() {
     }
   }
 
-  pc.oniceconnectionstatechange = () => {
-    console.info('[Mobile] ICE state:', pc?.iceConnectionState)
-  }
-
   pc.onicecandidate = (evt) => {
-    if (evt.candidate) {
-      console.info('[Mobile] local ICE candidate:', evt.candidate.type, evt.candidate.protocol, evt.candidate.address, evt.candidate.port)
-      sendToSignal(buildEnv('ice_candidate', evt.candidate.toJSON()))
-    } else {
-      console.info('[Mobile] ICE gathering completed')
-    }
+    if (evt.candidate) sendToSignal(buildEnv('ice_candidate', evt.candidate.toJSON()))
   }
 
   dc = pc.createDataChannel('control', { ordered: false, maxRetransmits: 0 })
   dc.onopen = () => {
-    console.info('[Mobile] control DataChannel opened')
     connectionMode.value = 'webrtc'
   }
   dc.onclose = () => {
@@ -221,29 +210,90 @@ function startWebRTC() {
 
   pc.createOffer()
     .then((offer) => pc!.setLocalDescription(offer))
-    .then(() => sendToSignal(buildEnv('offer', pc!.localDescription)))
-    .catch(console.error)
+    .then(() => sendToSignal(buildEnv('offer', {
+      description: pc!.localDescription,
+      profile: 'mobile',
+    })))
+    .catch((err) => console.warn('[Mobile] create offer failed:', err))
 }
 
 function handleAnswer(desc: any) {
   if (!pc) return
-  pc.setRemoteDescription(new RTCSessionDescription(desc)).catch(console.error)
+  pc.setRemoteDescription(new RTCSessionDescription(desc)).catch((err) => console.warn('[Mobile] set remote description failed:', err))
 }
 
 function sendCommand(type: string, data: unknown) {
   const payload = { type, payload: data }
   if (dc?.readyState === 'open') {
-    dc.send(JSON.stringify(payload))
-  } else {
-    sendToSignal(buildEnv('forward', { from: 'phone', payload }))
+    try {
+      dc.send(JSON.stringify(payload))
+      return
+    } catch (err) {
+      console.warn('[Mobile] DataChannel send failed, fallback to signaling:', err)
+    }
   }
+  sendToSignal(buildEnv('forward', { from: 'phone', payload }))
 }
 
-const THROTTLE_MS = 28
-const MIN_DELTA = 0.002
+const THROTTLE_MS = 16
+const MIN_DELTA = 0.001
 let lastSendTime = 0
 let lastJoyX = -1
 let lastJoyY = -1
+let joyActive = false
+let joyVX = 0
+let joyVY = 0
+let joyLastTick = 0
+let joyTimer: ReturnType<typeof setInterval> | null = null
+
+function emitJoystickMove() {
+  const now = Date.now()
+  if (now - lastSendTime < THROTTLE_MS) return
+  lastSendTime = now
+
+  if (lastJoyX >= 0 && lastJoyY >= 0) {
+    const ddx = Math.abs(cursorX - lastJoyX)
+    const ddy = Math.abs(cursorY - lastJoyY)
+    if (ddx < MIN_DELTA && ddy < MIN_DELTA) return
+  }
+  lastJoyX = cursorX
+  lastJoyY = cursorY
+
+  sendCommand('MOUSE_MOVE', { xRatio: cursorX, yRatio: cursorY })
+}
+
+function joystickTick() {
+  if (!joyActive) {
+    stopJoystickLoop()
+    return
+  }
+
+  const now = performance.now()
+  const dt = joyLastTick > 0 ? Math.min(34, now - joyLastTick) : 16.7
+  joyLastTick = now
+
+  cursorX = Math.max(0, Math.min(1, cursorX + joyVX * (dt / 16.7)))
+  cursorY = Math.max(0, Math.min(1, cursorY + joyVY * (dt / 16.7)))
+  emitJoystickMove()
+}
+
+function startJoystickLoop() {
+  joyActive = true
+  if (joyTimer) return
+  joyLastTick = performance.now()
+  joyTimer = setInterval(joystickTick, THROTTLE_MS)
+}
+
+function stopJoystickLoop() {
+  joyActive = false
+  joyVX = 0
+  joyVY = 0
+  joyLastTick = 0
+  if (joyTimer) {
+    clearInterval(joyTimer)
+    joyTimer = null
+  }
+}
 
 async function initJoystick() {
   await nextTick()
@@ -258,33 +308,25 @@ async function initJoystick() {
   })
 
   joystick.on('move', (_evt, data: nipplejs.JoystickOutputData) => {
-    if (data.force < 0.04) return
+    if (data.force < 0.04) {
+      stopJoystickLoop()
+      return
+    }
 
     const speed = 0.0065
-    const dx = Math.cos(data.angle!.radian) * data.force * speed
-    const dy = -Math.sin(data.angle!.radian) * data.force * speed
+    joyVX = Math.cos(data.angle!.radian) * data.force * speed
+    joyVY = -Math.sin(data.angle!.radian) * data.force * speed
+    startJoystickLoop()
+  })
 
-    cursorX = Math.max(0, Math.min(1, cursorX + dx))
-    cursorY = Math.max(0, Math.min(1, cursorY + dy))
-
-    const now = Date.now()
-    if (now - lastSendTime < THROTTLE_MS) return
-    lastSendTime = now
-
-    if (lastJoyX >= 0 && lastJoyY >= 0) {
-      const ddx = Math.abs(cursorX - lastJoyX)
-      const ddy = Math.abs(cursorY - lastJoyY)
-      if (ddx < MIN_DELTA && ddy < MIN_DELTA) return
-    }
-    lastJoyX = cursorX
-    lastJoyY = cursorY
-
-    sendCommand('MOUSE_MOVE', { xRatio: cursorX, yRatio: cursorY })
+  joystick.on('end', () => {
+    stopJoystickLoop()
   })
 }
 
 function cleanupPeer(closeWS = true, resetControls = true) {
   if (resetControls) {
+    stopJoystickLoop()
     joystick?.destroy()
     joystick = null
   }
@@ -308,6 +350,7 @@ watch(connected, (value) => {
   if (value) {
     initJoystick()
   } else {
+    stopJoystickLoop()
     joystick?.destroy()
     joystick = null
   }

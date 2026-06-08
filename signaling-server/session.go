@@ -81,7 +81,6 @@ func (h *Hub) getOrCreateSession(sid string) *session {
 	if !ok {
 		s = &session{id: sid}
 		h.sessions[sid] = s
-		log.Printf("[Hub] create session %s", sid)
 	}
 	return s
 }
@@ -96,7 +95,6 @@ func (h *Hub) removeSession(sid string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	delete(h.sessions, sid)
-	log.Printf("[Hub] remove session %s", sid)
 }
 
 func (h *Hub) assignPeer(sid string, p *peer) {
@@ -111,9 +109,6 @@ func (h *Hub) assignPeer(sid string, p *peer) {
 		s.phone = p
 	}
 
-	log.Printf("[Hub] session %s: %s joined (computer=%v phone=%v)",
-		sid, p.role, s.computer != nil, s.phone != nil)
-
 	var partner *peer
 	if p.role == RoleComputer && s.phone != nil {
 		partner = s.phone
@@ -125,7 +120,6 @@ func (h *Hub) assignPeer(sid string, p *peer) {
 		notif, _ := json.Marshal(envelope{Type: "peer_joined", Payload: nil})
 		trySend(partner, websocket.TextMessage, notif)
 		trySend(p, websocket.TextMessage, notif)
-		log.Printf("[Hub] session %s: both peers ready, sent peer_joined", sid)
 	}
 }
 
@@ -144,13 +138,11 @@ func (h *Hub) unassignPeer(sid string, p *peer) {
 		partner = s.computer
 	}
 
-	log.Printf("[Hub] session %s: %s left", sid, p.role)
-
 	if partner != nil {
 		payload, _ := json.Marshal(p.role)
 		notif, _ := json.Marshal(envelope{Type: "peer_left", Payload: payload})
 		if !trySend(partner, websocket.TextMessage, notif) {
-			log.Printf("[Hub] session %s: peer_left dropped because target queue is full", sid)
+			log.Printf("[WARN] session %s: peer_left dropped because target queue is full", sid)
 		}
 	}
 
@@ -162,7 +154,7 @@ func (h *Hub) unassignPeer(sid string, p *peer) {
 func (h *Hub) forwardWithType(sid, fromRole string, msg []byte, msgType int) {
 	s := h.getSession(sid)
 	if s == nil {
-		log.Printf("[Hub] session %s not found, drop message", sid)
+		log.Printf("[WARN] session %s not found, drop message", sid)
 		return
 	}
 
@@ -176,7 +168,7 @@ func (h *Hub) forwardWithType(sid, fromRole string, msg []byte, msgType int) {
 		target = s.computer
 	}
 	if target == nil {
-		log.Printf("[Hub] session %s: no target for source=%s, drop %d bytes", sid, fromRole, len(msg))
+		log.Printf("[WARN] session %s: no target for source=%s, drop %d bytes", sid, fromRole, len(msg))
 		return
 	}
 
@@ -185,12 +177,8 @@ func (h *Hub) forwardWithType(sid, fromRole string, msg []byte, msgType int) {
 		return
 	}
 
-	var env envelope
-	if json.Unmarshal(msg, &env) == nil && env.Type != "" {
-		log.Printf("[Hub] session %s: forward text type=%s from=%s bytes=%d", sid, env.Type, fromRole, len(msg))
-	}
 	if !trySend(target, msgType, msg) {
-		log.Printf("[Hub] session %s: target control queue full, drop %d bytes", sid, len(msg))
+		log.Printf("[WARN] session %s: target control queue full, drop %d bytes", sid, len(msg))
 	}
 }
 
@@ -209,7 +197,7 @@ func (h *Hub) forwardLatestFrame(sid string, target *peer, frame []byte) {
 	select {
 	case target.latestFrame <- frame:
 	default:
-		log.Printf("[Hub] session %s: target frame slot full, drop %d bytes", sid, len(frame))
+		log.Printf("[WARN] session %s: target frame slot full, drop %d bytes", sid, len(frame))
 	}
 }
 
@@ -229,18 +217,17 @@ var upgrader = websocket.Upgrader{
 func serveWS(hub *Hub, w http.ResponseWriter, r *http.Request, role string) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("[WS] upgrade failed: %v", err)
+		log.Printf("[WARN] websocket upgrade failed: %v", err)
 		return
 	}
 
 	sid := r.URL.Query().Get("sid")
 	if role == RoleComputer && sid == "" {
 		sid = generateRoomCode()
-		log.Printf("[Hub] assigned room code for computer: %s", sid)
 	}
 
 	if sid == "" {
-		log.Printf("[WS] reject connection: missing sid")
+		log.Printf("[WARN] reject connection: missing sid")
 		_ = conn.WriteJSON(envelope{Type: "error", Payload: []byte(`"missing session ID"`)})
 		_ = conn.Close()
 		return
@@ -279,7 +266,7 @@ func serveWS(hub *Hub, w http.ResponseWriter, r *http.Request, role string) {
 	for {
 		msgType, raw, err := conn.ReadMessage()
 		if err != nil {
-			log.Printf("[WS] read error (%s %s): %v", sid, role, err)
+			log.Printf("[WARN] websocket read failed (%s %s): %v", sid, role, err)
 			break
 		}
 
@@ -290,7 +277,7 @@ func serveWS(hub *Hub, w http.ResponseWriter, r *http.Request, role string) {
 
 		var msg envelope
 		if err := json.Unmarshal(raw, &msg); err != nil {
-			log.Printf("[WS] invalid text message (%s %s): %v", sid, role, err)
+			log.Printf("[WARN] invalid text message (%s %s): %v", sid, role, err)
 			continue
 		}
 
@@ -307,7 +294,6 @@ func serveWS(hub *Hub, w http.ResponseWriter, r *http.Request, role string) {
 						payload = []byte(text)
 					}
 				}
-				log.Printf("[WS] forward envelope sid=%s from=%s bytes=%d", sid, inner.From, len(payload))
 				hub.forwardWithType(sid, inner.From, payload, websocket.TextMessage)
 				continue
 			}
@@ -357,7 +343,7 @@ func writePump(conn *websocket.Conn, p *peer, sid, role string) {
 		case <-ticker.C:
 			_ = conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
 			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
-				log.Printf("[WS] ping error (%s %s): %v", sid, role, err)
+				log.Printf("[WARN] websocket ping failed (%s %s): %v", sid, role, err)
 				return
 			}
 		}
@@ -367,7 +353,7 @@ func writePump(conn *websocket.Conn, p *peer, sid, role string) {
 func writeWS(conn *websocket.Conn, sid, role string, msgType int, data []byte) bool {
 	_ = conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
 	if err := conn.WriteMessage(msgType, data); err != nil {
-		log.Printf("[WS] write error (%s %s): %v", sid, role, err)
+		log.Printf("[WARN] websocket write failed (%s %s): %v", sid, role, err)
 		return false
 	}
 	return true

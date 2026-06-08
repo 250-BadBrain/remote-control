@@ -1,5 +1,6 @@
 import { createRouter, createWebHashHistory } from 'vue-router'
 import Dashboard from '../views/Dashboard.vue'
+import Host from '../views/Host.vue'
 import Viewer from '../views/Viewer.vue'
 import MobilePad from '../views/MobilePad.vue'
 
@@ -8,6 +9,11 @@ const routes = [
     path: '/',
     name: 'Dashboard',
     component: Dashboard,
+  },
+  {
+    path: '/host',
+    name: 'Host',
+    component: Host,
   },
   {
     path: '/viewer',

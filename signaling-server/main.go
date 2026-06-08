@@ -8,29 +8,25 @@ import (
 )
 
 func main() {
-	// ---------- 日志初始化 ----------
 	execPath, err := os.Executable()
 	if err != nil {
-		log.Fatalf("获取可执行文件路径失败: %v", err)
+		log.Fatalf("[FATAL] get executable path failed: %v", err)
 	}
 	logDir := filepath.Dir(execPath)
 	logPath := filepath.Join(logDir, "server.log")
 
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
-		log.Fatalf("创建日志文件失败: %v", err)
+		log.Fatalf("[FATAL] open log file failed: %v", err)
 	}
 	defer logFile.Close()
 
 	log.SetOutput(logFile)
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
-	log.Printf("[Server] 日志文件: %s", logPath)
-
 	hub := NewHub()
 	go hub.Run()
 
-	// ---------- WebSocket 端点 ----------
 	http.HandleFunc("/connect/computer", func(w http.ResponseWriter, r *http.Request) {
 		serveWS(hub, w, r, RoleComputer)
 	})
@@ -38,26 +34,21 @@ func main() {
 		serveWS(hub, w, r, RolePhone)
 	})
 
-	// ---------- HTTP API / 静态文件 ----------
 	staticDir := findStaticDir()
 	if staticDir != "" {
-		log.Printf("[HTTP] 从 %s 提供静态文件", staticDir)
 		fs := http.FileServer(http.Dir(staticDir))
 		http.Handle("/", fs)
 	} else {
-		log.Println("[HTTP] 未找到前端静态目录，仅提供 WebSocket 服务")
 		http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-			w.Write([]byte("Remote Control Signaling Server\n\nWebSocket 端点:\n  /connect/computer\n  /connect/phone\n"))
+			w.Write([]byte("Remote Control Signaling Server\n\nWebSocket endpoints:\n  /connect/computer\n  /connect/phone\n"))
 		})
 	}
 
 	addr := ":8443"
-	log.Printf("[Server] 信令服务器启动于 %s (HTTPS)", addr)
-	log.Fatalf("服务器启动失败: %v", http.ListenAndServeTLS(addr, "server.crt", "server.key", nil))
+	log.Fatalf("[FATAL] server stopped: %v", http.ListenAndServeTLS(addr, "server.crt", "server.key", nil))
 }
 
-// findStaticDir 按优先级查找前端静态目录
 func findStaticDir() string {
 	candidates := []string{
 		filepath.Join("frontend", "dist"),
