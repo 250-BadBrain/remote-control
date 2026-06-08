@@ -41,13 +41,7 @@
       </div>
 
       <div class="preview-bar">
-        <video
-          ref="remoteVideo"
-          class="remote-video"
-          autoplay
-          playsinline
-          muted
-        />
+        <video ref="remoteVideo" class="remote-video" autoplay playsinline muted />
       </div>
 
       <div class="pad-row">
@@ -118,7 +112,6 @@ function connect(code: string, addr: string) {
   disconnectReason.value = ''
   const url = `${addr}/connect/phone?sid=${encodeURIComponent(code)}`
   ws = new WebSocket(url)
-  ws.binaryType = 'blob'
 
   ws.onopen = () => {
     connected.value = true
@@ -169,7 +162,7 @@ function handleDisconnected(reason: string) {
 }
 
 function startWebRTC() {
-  cleanupPeer(false)
+  cleanupPeer(false, false)
   const cfg: RTCConfiguration = {
     iceServers: buildIceServers(),
     iceTransportPolicy: 'all',
@@ -290,9 +283,11 @@ async function initJoystick() {
   })
 }
 
-function cleanupPeer(closeWS = true) {
-  joystick?.destroy()
-  joystick = null
+function cleanupPeer(closeWS = true, resetControls = true) {
+  if (resetControls) {
+    joystick?.destroy()
+    joystick = null
+  }
   dc?.close()
   dc = null
   pc?.close()
