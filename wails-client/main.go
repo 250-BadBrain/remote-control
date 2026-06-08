@@ -19,11 +19,12 @@ func main() {
 		Title:             "Remote Control",
 		Width:             1024,
 		Height:            768,
-		HideWindowOnClose: true,
+		HideWindowOnClose: false,
 		AssetServer: &assetserver.Options{
 			Assets: assets,
 		},
-		OnStartup: app.startup,
+		OnStartup:  app.startup,
+		OnShutdown: app.shutdown,
 		Bind: []interface{}{
 			app,
 		},

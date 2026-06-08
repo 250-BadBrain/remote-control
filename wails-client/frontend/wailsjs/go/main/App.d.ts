@@ -3,6 +3,8 @@
 
 export function Connect(arg1:string,arg2:string,arg3:string):Promise<void>;
 
+export function Disconnect():Promise<void>;
+
 export function GetInsecureTLS():Promise<boolean>;
 
 export function GetPeerConnected():Promise<boolean>;

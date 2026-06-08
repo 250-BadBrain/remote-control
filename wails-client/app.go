@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/go-vgo/robotgo"
 	"github.com/gorilla/websocket"
@@ -158,8 +159,10 @@ type App struct {
 	pc                  *webrtc.PeerConnection
 	dc                  *webrtc.DataChannel
 	mu                  sync.Mutex
+	signalWriteMu       sync.Mutex
 	peerReady           bool
 	relayCaptureRunning bool
+	relayFallbackTimer  *time.Timer
 
 	screenW     int
 	screenH     int
@@ -191,6 +194,18 @@ func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	setupClientLog()
 	enableDPIAwareness()
+	a.screenW, a.screenH = robotgo.GetScreenSize()
+	if a.screenW <= 0 || a.screenH <= 0 {
+		bounds := screenshot.GetDisplayBounds(0)
+		a.screenW = bounds.Dx()
+		a.screenH = bounds.Dy()
+		log.Printf("[App] robotgo screen size unavailable, fallback to screenshot bounds")
+	}
+	a.dpiScale = getDPIScale()
+	if a.dpiScale <= 0 {
+		a.dpiScale = 1.0
+	}
+	a.logicalW = int(float64(a.screenW) / a.dpiScale)
 
 	// 闂佸吋鍎抽崲鑼躲亹閸ヮ剚鍋嬮柍鍝勫暞閸婄偤鏌涢幒鎴烆棥濡炲瓨鎮傞幃?	a.screenW, a.screenH = robotgo.GetScreenSize()
 	// 闂佸吋鍎抽崲鑼躲亹?DPI 缂傚倸鍊甸弲婊堝棘?	a.dpiScale = getDPIScale()
@@ -199,6 +214,11 @@ func (a *App) startup(ctx context.Context) {
 
 	log.Printf("[App] screen physical=%dx%d logical=%dx%d dpiScale=%.2f",
 		a.screenW, a.screenH, a.logicalW, a.logicalH, a.dpiScale)
+}
+
+func (a *App) shutdown(ctx context.Context) {
+	log.Printf("[App] shutdown requested")
+	_ = a.Disconnect()
 }
 
 func setupClientLog() {
@@ -232,6 +252,45 @@ func (a *App) GetPeerConnected() bool {
 	return a.getPeerConnected()
 }
 
+func (a *App) Disconnect() error {
+	a.mu.Lock()
+	conn := a.sigConn
+	pc := a.pc
+	dc := a.dc
+	timer := a.relayFallbackTimer
+	a.sigConn = nil
+	a.pc = nil
+	a.dc = nil
+	a.peerReady = false
+	a.relayCaptureRunning = false
+	a.relayFallbackTimer = nil
+	a.mu.Unlock()
+
+	if timer != nil {
+		timer.Stop()
+	}
+	if dc != nil {
+		_ = dc.Close()
+	}
+	if pc != nil {
+		_ = pc.Close()
+	}
+	if conn != nil {
+		deadline := time.Now().Add(time.Second)
+		_ = conn.WriteControl(
+			websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseNormalClosure, "client closing"),
+			deadline,
+		)
+		_ = conn.Close()
+	}
+	if a.ctx != nil {
+		wailsruntime.EventsEmit(a.ctx, "peer_status", false)
+	}
+	log.Printf("[App] disconnected")
+	return nil
+}
+
 func (a *App) getPeerConnected() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -249,11 +308,16 @@ func (a *App) setPeerConnected(ready bool) {
 
 func (a *App) writeSignalMessage(msgType int, msg []byte) error {
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.sigConn == nil {
+	conn := a.sigConn
+	a.mu.Unlock()
+	if conn == nil {
 		return nil
 	}
-	return a.sigConn.WriteMessage(msgType, msg)
+
+	a.signalWriteMu.Lock()
+	defer a.signalWriteMu.Unlock()
+	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	return conn.WriteMessage(msgType, msg)
 }
 
 func (a *App) writeSignal(msg []byte) error {
@@ -319,6 +383,9 @@ func (a *App) Connect(role, signalingURL, sessionID string) error {
 
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		log.Printf("[App] PeerConnection state: %s", state.String())
+		if state == webrtc.PeerConnectionStateConnected {
+			a.cancelRelayFallback()
+		}
 		if state == webrtc.PeerConnectionStateFailed ||
 			state == webrtc.PeerConnectionStateDisconnected ||
 			state == webrtc.PeerConnectionStateClosed {
@@ -417,6 +484,7 @@ func (a *App) setupDataChannel(dc *webrtc.DataChannel) {
 
 	// 婵炶揪绲剧划鍫㈡嫻閻旂儤鍋栨い鎰剁到娴犳绱掗弮鎴濈伈缂佽鲸鐛憃mputer闂佹寧绋戦¨鈧紒杈ㄧ箚閵?DataChannel 閻庢鍠掗崑鎾绘煕濮樼厧鐏犻柟顔筋殔椤曪綁鍩€椤掍焦鍙忛悗锝庡亜閼靛綊姊洪锛勵槮闁活偄妫濋悰顕€寮撮悙鏉戭潛
 	dc.OnOpen(func() {
+		a.cancelRelayFallback()
 		a.setPeerConnected(true)
 		if a.getRole() != RoleComputer {
 			log.Printf("[App] DataChannel opened, no screen push needed for this role")
@@ -447,6 +515,35 @@ func (a *App) setupDataChannel(dc *webrtc.DataChannel) {
 			})
 		}()
 	})
+}
+
+func (a *App) scheduleRelayFallback(delay time.Duration, reason string) {
+	if a.getRole() != RoleComputer {
+		return
+	}
+
+	a.mu.Lock()
+	if a.relayFallbackTimer != nil {
+		a.relayFallbackTimer.Stop()
+	}
+	a.relayFallbackTimer = time.AfterFunc(delay, func() {
+		if !a.getPeerConnected() || a.dataChannelOpen() {
+			return
+		}
+		log.Printf("[App] WebRTC fallback timeout: %s", reason)
+		a.startRelayCapture()
+	})
+	a.mu.Unlock()
+}
+
+func (a *App) cancelRelayFallback() {
+	a.mu.Lock()
+	timer := a.relayFallbackTimer
+	a.relayFallbackTimer = nil
+	a.mu.Unlock()
+	if timer != nil {
+		timer.Stop()
+	}
 }
 
 func sendFrameDataChannel(dc *webrtc.DataChannel, frameID uint32, frame []byte) error {
@@ -620,14 +717,22 @@ func (a *App) execScroll(d scrollData) {
 }
 
 func (a *App) readSignaling() {
+	a.mu.Lock()
+	conn := a.sigConn
+	a.mu.Unlock()
+	if conn == nil {
+		log.Printf("[App] signaling read skipped: no connection")
+		return
+	}
+
 	defer func() {
 		if !a.dataChannelOpen() {
 			a.setPeerConnected(false)
 		}
-		a.sigConn.Close()
+		_ = conn.Close()
 	}()
 	for {
-		_, raw, err := a.sigConn.ReadMessage()
+		_, raw, err := conn.ReadMessage()
 		if err != nil {
 			log.Printf("[App] signaling read error: %v", err)
 			return
@@ -644,30 +749,51 @@ func (a *App) readSignaling() {
 			log.Printf("[Signal] session assigned: %s", sid)
 
 		case "offer":
-			if a.pc == nil {
+			a.mu.Lock()
+			pc := a.pc
+			a.mu.Unlock()
+			if pc == nil {
 				log.Printf("[App] pc is nil, skipping")
 				continue
 			}
 
 			var desc webrtc.SessionDescription
 			json.Unmarshal(env.Payload, &desc)
-			a.pc.SetRemoteDescription(desc)
-			answer, _ := a.pc.CreateAnswer(nil)
-			a.pc.SetLocalDescription(answer)
+			if err := pc.SetRemoteDescription(desc); err != nil {
+				log.Printf("[App] SetRemoteDescription failed: %v", err)
+				continue
+			}
+			answer, err := pc.CreateAnswer(nil)
+			if err != nil {
+				log.Printf("[App] CreateAnswer failed: %v", err)
+				continue
+			}
+			if err := pc.SetLocalDescription(answer); err != nil {
+				log.Printf("[App] SetLocalDescription failed: %v", err)
+				continue
+			}
 			ansJSON, _ := json.Marshal(answer)
 			msg, _ := json.Marshal(envelope{Type: "answer", Payload: ansJSON})
 			_ = a.writeSignal(msg)
 
 		case "answer":
-			if a.pc == nil {
+			a.mu.Lock()
+			pc := a.pc
+			a.mu.Unlock()
+			if pc == nil {
 				continue
 			}
 			var desc webrtc.SessionDescription
 			json.Unmarshal(env.Payload, &desc)
-			a.pc.SetRemoteDescription(desc)
+			if err := pc.SetRemoteDescription(desc); err != nil {
+				log.Printf("[App] SetRemoteDescription failed: %v", err)
+			}
 
 		case "ice_candidate":
-			if a.pc == nil {
+			a.mu.Lock()
+			pc := a.pc
+			a.mu.Unlock()
+			if pc == nil {
 				continue
 			}
 			var cand webrtc.ICECandidateInit
@@ -678,12 +804,14 @@ func (a *App) readSignaling() {
 				}
 			}
 			log.Printf("[ICE] remote candidate: %s", cand.Candidate)
-			a.pc.AddICECandidate(cand)
+			if err := pc.AddICECandidate(cand); err != nil {
+				log.Printf("[ICE] AddICECandidate failed: %v", err)
+			}
 
 		case "peer_joined":
 			a.setPeerConnected(true)
 			log.Printf("[App] peer joined session %s", a.sessionID)
-			a.startRelayCapture()
+			a.scheduleRelayFallback(12*time.Second, "peer joined but DataChannel is not open")
 
 		case "peer_left":
 			var leftRole string

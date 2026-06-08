@@ -77,11 +77,13 @@ function connect() {
 
   ws.onmessage = (evt: MessageEvent) => {
     if (evt.data instanceof Blob) {
+      if (connectionMode.value === 'webrtc' && dc?.readyState === 'open') return
       connectionMode.value = 'relay'
       handleIncomingFrame(evt.data, onVideoFrame)
       return
     }
     if (evt.data instanceof ArrayBuffer) {
+      if (connectionMode.value === 'webrtc' && dc?.readyState === 'open') return
       connectionMode.value = 'relay'
       handleIncomingFrame(evt.data, onVideoFrame)
       return
