@@ -1,30 +1,49 @@
 <template>
   <div class="mobile-pad" @contextmenu.prevent>
-    <!-- 连接表单 -->
     <div v-if="!connected" class="connect-form">
-      <h1>远程控制</h1>
-      <input v-model="inputCode" placeholder="输入 6 位房间码" maxlength="6" class="code-input" />
-      <input v-model="inputServer" placeholder="信令服务器地址 (默认 wss://signal.h2seo4.win:8443)" class="server-input" />
-      <button @click="doConnect" class="btn-connect">连接</button>
+      <div class="connect-panel">
+        <h1>远程控制</h1>
+
+        <label class="field-label" for="room-code">房间码</label>
+        <input
+          id="room-code"
+          v-model="inputCode"
+          placeholder="输入 6 位房间码"
+          maxlength="6"
+          inputmode="numeric"
+          autocomplete="one-time-code"
+          class="code-input"
+          :class="{ 'has-code': inputCode.length > 0 }"
+        />
+
+        <label class="field-label" for="signal-server">信令服务器</label>
+        <input
+          id="signal-server"
+          v-model="inputServer"
+          placeholder="wss://signal.h2seo4.win:8443"
+          autocomplete="url"
+          autocapitalize="off"
+          spellcheck="false"
+          class="server-input"
+        />
+
+        <button @click="doConnect" class="btn-connect">连接</button>
+      </div>
       <p v-if="errorMsg" class="error">{{ errorMsg }}</p>
     </div>
 
-    <!-- 控制面板 -->
     <div v-else class="control-area">
-      <!-- 退化模式状态条 -->
       <div class="status-bar">
         <span class="room-badge">{{ sessionId }}</span>
-        <span v-if="connectionMode === 'relay'" class="relay-badge">⚡ 中继模式</span>
-        <span v-else-if="connectionMode === 'connecting'" class="wait-badge">⏳ 握手...</span>
+        <span v-if="connectionMode === 'relay'" class="relay-badge">中继模式</span>
+        <span v-else-if="connectionMode === 'connecting'" class="wait-badge">握手中...</span>
         <span v-else class="direct-badge">直连</span>
       </div>
 
-      <!-- 屏幕预览 (小窗) -->
       <div class="preview-bar">
         <canvas ref="previewCanvas" class="preview-canvas" />
       </div>
 
-      <!-- 摇杆 + 按键 -->
       <div class="pad-row">
         <div ref="joystickZone" class="joystick-zone" />
         <div class="btn-group">
@@ -47,11 +66,9 @@ import { buildIceServers } from '../utils/ice'
 import { handleIncomingFrame } from '../utils/frame'
 import { DEFAULT_SIGNAL_SERVER, getDefaultSignalServer } from '../utils/signal'
 
-/* ---- 退化模式 ---- */
 type ConnMode = 'connecting' | 'webrtc' | 'relay'
 const connectionMode = ref<ConnMode>('connecting')
 
-/* ---- 连接参数 ---- */
 const inputCode = ref('')
 const inputServer = ref(getDefaultSignalServer() || DEFAULT_SIGNAL_SERVER)
 const errorMsg = ref('')
@@ -59,37 +76,33 @@ const connected = ref(false)
 const sessionId = ref('')
 const disconnectReason = ref('')
 
-/* ---- DOM 引用 ---- */
 const previewCanvas = ref<HTMLCanvasElement | null>(null)
 const joystickZone = ref<HTMLDivElement | null>(null)
 
-/* ---- WebRTC 相关 ---- */
 let ws: WebSocket | null = null
 let pc: RTCPeerConnection | null = null
 let dc: RTCDataChannel | null = null
 let joystick: nipplejs.JoystickManager | null = null
 let relayTimeout: ReturnType<typeof setTimeout> | null = null
 
-/* ---- 虚拟光标 (摇杆控制) ---- */
 let cursorX = 0.5
 let cursorY = 0.5
 
-/* ---- 工具函数 ---- */
 function buildEnv(type: string, payload: unknown) {
   return JSON.stringify({ type, payload })
 }
+
 function sendToSignal(msg: string) {
   if (ws?.readyState === WebSocket.OPEN) ws.send(msg)
 }
 
-/* ---- 连接信令服务器 ---- */
 function doConnect() {
   const code = inputCode.value.trim()
   if (!code || code.length !== 6) {
     errorMsg.value = '请输入有效的 6 位房间码'
     return
   }
-  let addr = (inputServer.value.trim() || DEFAULT_SIGNAL_SERVER).replace(/\/+$/, '')
+  const addr = (inputServer.value.trim() || DEFAULT_SIGNAL_SERVER).replace(/\/+$/, '')
   errorMsg.value = ''
   connect(code, addr)
 }
@@ -107,11 +120,13 @@ function connect(code: string, addr: string) {
 
   ws.onmessage = (evt: MessageEvent) => {
     if (evt.data instanceof Blob) {
+      if (connectionMode.value === 'webrtc' && dc?.readyState === 'open') return
       connectionMode.value = 'relay'
       handleIncomingFrame(evt.data, onVideoFrame)
       return
     }
     if (evt.data instanceof ArrayBuffer) {
+      if (connectionMode.value === 'webrtc' && dc?.readyState === 'open') return
       connectionMode.value = 'relay'
       handleIncomingFrame(evt.data, onVideoFrame)
       return
@@ -167,7 +182,6 @@ function handleDisconnected(reason: string) {
   pc = null
 }
 
-/* ---- WebRTC (phone 端，黄金退化顺位 1-3) ---- */
 function startWebRTC() {
   const iceServers = buildIceServers()
   console.info('[Mobile] ICE servers:', iceServers.map((s) => s.urls))
@@ -179,12 +193,12 @@ function startWebRTC() {
 
   pc.onconnectionstatechange = () => {
     const state = pc!.connectionState
-    console.log('[Mobile] 连接状态:', state)
-    if (state === 'connected' || state === 'completed') {
+    console.log('[Mobile] connection state:', state)
+    if (state === 'connected') {
       connectionMode.value = 'webrtc'
       if (relayTimeout) { clearTimeout(relayTimeout); relayTimeout = null }
     } else if (state === 'failed' || state === 'disconnected') {
-      console.warn('[Mobile] WebRTC 连接失败，退化到中继')
+      console.warn('[Mobile] WebRTC unavailable, fallback to relay')
       connectionMode.value = 'relay'
     }
   }
@@ -205,21 +219,20 @@ function startWebRTC() {
   dc = pc.createDataChannel('control')
   dc.binaryType = 'blob'
   dc.onopen = () => {
-    console.log('[Mobile] DataChannel 已打开')
+    console.log('[Mobile] DataChannel opened')
     connectionMode.value = 'webrtc'
   }
   dc.onclose = () => {
-    console.warn('[Mobile] DataChannel 关闭，退化到中继')
+    console.warn('[Mobile] DataChannel closed, fallback to relay')
     connectionMode.value = 'relay'
   }
   dc.onmessage = (evt: MessageEvent) => {
     handleIncomingFrame(evt.data, onVideoFrame)
   }
 
-  /* 5 秒握手超时 -> 中继 */
   relayTimeout = setTimeout(() => {
     if (connectionMode.value === 'connecting') {
-      console.warn('[Mobile] WebRTC 握手超时，退化到中继')
+      console.warn('[Mobile] WebRTC handshake timeout, fallback to relay')
       connectionMode.value = 'relay'
     }
   }, 12000)
@@ -244,7 +257,6 @@ function handleAnswer(desc: any) {
   pc.setRemoteDescription(new RTCSessionDescription(desc)).catch(console.error)
 }
 
-/* ---- 核查点一：Canvas 渲染防爆仓锁 ---- */
 let isRendering = false
 
 async function onVideoFrame(blob: Blob) {
@@ -271,11 +283,10 @@ async function onVideoFrame(blob: Blob) {
       ctx.drawImage(bitmap, dx, dy, bitmap.width * scale, bitmap.height * scale)
       bitmap.close()
     } catch { bitmap.close() }
-  } catch { /* createImageBitmap 失败，无需释放 */ }
+  } catch { /* ignore bad frame */ }
   finally { isRendering = false }
 }
 
-/* ---- 发送控制指令（退化感知） ---- */
 function sendCommand(type: string, data: unknown) {
   const payload = { type, payload: data }
   if (connectionMode.value === 'relay' || dc?.readyState !== 'open') {
@@ -287,15 +298,12 @@ function sendCommand(type: string, data: unknown) {
   }
 }
 
-/* ---- 优化三：摇杆节流 + 最小位移阈值 ---- */
-/* 摇杆事件频率极高（每帧触发），必须节流 */
 const THROTTLE_MS = 50
 const MIN_DELTA = 0.005
 let lastSendTime = 0
 let lastJoyX = -1
 let lastJoyY = -1
 
-/* ---- 摇杆逻辑 (nipplejs) ---- */
 async function initJoystick() {
   await nextTick()
   if (!joystickZone.value || joystick) return
@@ -318,12 +326,10 @@ async function initJoystick() {
     cursorX = Math.max(0, Math.min(1, cursorX + dx))
     cursorY = Math.max(0, Math.min(1, cursorY + dy))
 
-    /* 节流：每 THROTTLE_MS ms 最多发送一次 */
     const now = Date.now()
     if (now - lastSendTime < THROTTLE_MS) return
     lastSendTime = now
 
-    /* 最小位移阈值 */
     if (lastJoyX >= 0 && lastJoyY >= 0) {
       const ddx = Math.abs(cursorX - lastJoyX)
       const ddy = Math.abs(cursorY - lastJoyY)
@@ -333,10 +339,6 @@ async function initJoystick() {
     lastJoyY = cursorY
 
     sendCommand('MOUSE_MOVE', { xRatio: cursorX, yRatio: cursorY })
-  })
-
-  joystick.on('end', () => {
-    /* 摇杆归中时不做操作 */
   })
 }
 
@@ -361,10 +363,8 @@ onUnmounted(() => {
   ws?.close()
 })
 
-/* ---- 触摸按键 ---- */
 function clickLeft() {
   sendCommand('MOUSE_CLICK', { button: 'left', action: 'click' })
-  /* 触发触觉反馈 */
   if (navigator.vibrate) navigator.vibrate(20)
 }
 
@@ -377,7 +377,8 @@ function clickRight() {
 <style scoped>
 .mobile-pad {
   width: 100vw;
-  height: 100vh;
+  min-height: 100vh;
+  min-height: 100dvh;
   background: #0f172a;
   color: #e2e8f0;
   display: flex;
@@ -388,171 +389,252 @@ function clickRight() {
   -webkit-user-select: none;
 }
 
-/* ---- 连接表单 ---- */
 .connect-form {
+  width: 100%;
+  min-height: 100vh;
+  min-height: 100dvh;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  height: 100%;
-  padding: 2rem;
-  gap: 1rem;
+  padding: max(1rem, env(safe-area-inset-top)) max(1rem, env(safe-area-inset-right)) max(1rem, env(safe-area-inset-bottom)) max(1rem, env(safe-area-inset-left));
+  box-sizing: border-box;
+  gap: 0.85rem;
 }
-.connect-form h1 {
-  font-size: 1.8rem;
-  margin-bottom: 1rem;
+
+.connect-panel {
+  width: min(100%, 390px);
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
 }
-.code-input {
-  width: 200px;
-  padding: 0.75rem 1rem;
-  font-size: 1.5rem;
+
+.connect-panel h1 {
+  margin: 0 0 0.75rem;
+  font-size: clamp(1.75rem, 8vw, 2.35rem);
+  line-height: 1.1;
   text-align: center;
-  letter-spacing: 0.5em;
-  border: 2px solid #334155;
-  border-radius: 8px;
+  font-weight: 750;
+}
+
+.field-label {
+  font-size: 0.78rem;
+  color: #94a3b8;
+  line-height: 1.2;
+}
+
+.code-input,
+.server-input {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  border: 1px solid #334155;
   background: #1e293b;
   color: #e2e8f0;
   outline: none;
+  box-shadow: 0 0 0 0 rgba(79, 70, 229, 0);
+  transition: border-color 160ms ease, box-shadow 160ms ease, background 160ms ease;
 }
-.code-input:focus {
-  border-color: #4f46e5;
-}
-.server-input {
-  width: 90%;
-  max-width: 320px;
-  padding: 0.6rem 1rem;
-  font-size: 0.85rem;
-  border: 1px solid #334155;
-  border-radius: 6px;
-  background: #1e293b;
-  color: #94a3b8;
-  outline: none;
+
+.code-input {
+  height: 3.55rem;
+  padding: 0 1rem;
+  border-radius: 10px;
+  font-size: clamp(1.15rem, 6vw, 1.55rem);
   text-align: center;
+  letter-spacing: 0;
 }
+
+.code-input.has-code {
+  letter-spacing: 0.38em;
+  text-indent: 0.38em;
+}
+
+.server-input {
+  height: 3rem;
+  padding: 0 0.9rem;
+  border-radius: 8px;
+  font-size: 0.95rem;
+  text-align: left;
+}
+
+.code-input::placeholder,
+.server-input::placeholder {
+  color: #94a3b8;
+  opacity: 1;
+  letter-spacing: 0;
+  text-indent: 0;
+}
+
+.code-input:focus,
+.server-input:focus {
+  border-color: #6366f1;
+  background: #223047;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.22);
+}
+
 .btn-connect {
-  padding: 0.75rem 3rem;
+  width: 100%;
+  height: 3.15rem;
+  margin-top: 0.35rem;
   background: #4f46e5;
   color: #fff;
   border: none;
-  border-radius: 8px;
-  font-size: 1.1rem;
+  border-radius: 10px;
+  font-size: 1.05rem;
+  font-weight: 700;
   cursor: pointer;
-}
-.btn-connect:active {
-  background: #4338ca;
-}
-.error {
-  color: #ef4444;
-  font-size: 0.85rem;
+  touch-action: manipulation;
 }
 
-/* ---- 控制面板 ---- */
+.btn-connect:active {
+  background: #4338ca;
+  transform: translateY(1px);
+}
+
+.error {
+  width: min(100%, 390px);
+  margin: 0;
+  color: #fca5a5;
+  font-size: 0.88rem;
+  line-height: 1.35;
+  text-align: center;
+}
+
 .control-area {
   display: flex;
   flex-direction: column;
-  height: 100%;
+  height: 100vh;
+  height: 100dvh;
 }
 
-/* 状态条 */
 .status-bar {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  padding: 0.35rem 0.75rem;
+  min-height: 2.25rem;
+  padding: calc(0.35rem + env(safe-area-inset-top)) max(0.75rem, env(safe-area-inset-right)) 0.35rem max(0.75rem, env(safe-area-inset-left));
+  box-sizing: border-box;
   background: #1e293b;
-  font-size: 0.75rem;
-  font-family: monospace;
+  font-size: 0.78rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: nowrap;
+  overflow: hidden;
 }
+
 .room-badge {
   color: #22c55e;
 }
+
 .relay-badge {
   color: #f59e0b;
   animation: pulse 1.5s ease-in-out infinite;
 }
+
 .wait-badge {
-  color: #3b82f6;
+  color: #60a5fa;
 }
+
 .direct-badge {
   color: #22c55e;
 }
+
 @keyframes pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.6; }
 }
 
-/* 预览条 */
 .preview-bar {
   position: relative;
-  height: clamp(220px, 52vh, 520px);
-  min-height: 220px;
+  flex: 0 1 clamp(180px, 52dvh, 520px);
+  min-height: 160px;
   background: #000;
-  border-bottom: 2px solid #1e293b;
+  border-bottom: 1px solid #1e293b;
 }
+
 .preview-canvas {
+  display: block;
   width: 100%;
   height: 100%;
   object-fit: contain;
 }
 
-/* 摇杆 + 按键行 */
 .pad-row {
-  flex: 1;
-  min-height: 190px;
+  flex: 1 1 auto;
+  min-height: 170px;
   display: flex;
   align-items: center;
   justify-content: space-around;
-  padding: 0.5rem;
+  gap: clamp(1rem, 8vw, 3rem);
+  padding: 0.75rem max(1rem, env(safe-area-inset-right)) max(0.75rem, env(safe-area-inset-bottom)) max(1rem, env(safe-area-inset-left));
+  box-sizing: border-box;
 }
 
-@media (max-height: 680px) {
-  .preview-bar {
-    height: 44vh;
-    min-height: 160px;
-  }
-
-  .pad-row {
-    min-height: 170px;
-  }
-}
-
-/* 摇杆容器 */
 .joystick-zone {
-  width: 160px;
-  height: 160px;
+  width: clamp(135px, 38vw, 170px);
+  height: clamp(135px, 38vw, 170px);
   position: relative;
   touch-action: none;
+  flex: 0 0 auto;
 }
 
-/* 按键组 */
 .btn-group {
   display: flex;
   flex-direction: column;
-  gap: 1rem;
+  gap: 0.85rem;
+  flex: 0 0 auto;
 }
+
 .touch-btn {
-  width: 90px;
-  height: 90px;
+  width: clamp(76px, 22vw, 92px);
+  height: clamp(76px, 22vw, 92px);
   border-radius: 50%;
   border: none;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 0.9rem;
-  font-weight: 600;
+  font-size: 0.92rem;
+  font-weight: 700;
   color: #fff;
   cursor: pointer;
   touch-action: manipulation;
 }
+
 .touch-btn:active {
-  transform: scale(0.92);
+  transform: scale(0.94);
 }
+
 .btn-left {
-  background: linear-gradient(135deg, #3b82f6, #2563eb);
-  box-shadow: 0 4px 12px rgba(59,130,246,0.4);
+  background: #2563eb;
+  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.35);
 }
+
 .btn-right {
-  background: linear-gradient(135deg, #ef4444, #dc2626);
-  box-shadow: 0 4px 12px rgba(239,68,68,0.4);
+  background: #dc2626;
+  box-shadow: 0 4px 12px rgba(220, 38, 38, 0.35);
+}
+
+@media (max-height: 680px) {
+  .preview-bar {
+    flex-basis: clamp(145px, 44dvh, 320px);
+    min-height: 135px;
+  }
+
+  .pad-row {
+    min-height: 145px;
+    padding-top: 0.5rem;
+    padding-bottom: max(0.5rem, env(safe-area-inset-bottom));
+  }
+
+  .joystick-zone {
+    width: clamp(118px, 34vw, 150px);
+    height: clamp(118px, 34vw, 150px);
+  }
+
+  .touch-btn {
+    width: clamp(66px, 19vw, 82px);
+    height: clamp(66px, 19vw, 82px);
+  }
 }
 </style>
